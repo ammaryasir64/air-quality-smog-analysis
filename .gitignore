@@ -1,0 +1,23 @@
+# Secrets (NEVER commit these)
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+secrets.toml
+
+# Virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code and OS files
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated chart images
+charts/*.png
+charts/*.html
