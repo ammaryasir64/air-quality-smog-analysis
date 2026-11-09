@@ -15,7 +15,7 @@ API_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 TIMEZONE = "Asia/Karachi"
 
 # Request settings
-REQUEST_TIMEOUT_SECONDS = 30
+REQUEST_TIMEOUT_SECONDS = 45
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
 PAUSE_BETWEEN_CITIES_SECONDS = 1
