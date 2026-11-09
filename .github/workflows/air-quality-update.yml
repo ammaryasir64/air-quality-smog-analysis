@@ -1,0 +1,35 @@
+name: Air Quality ETL
+
+on:
+  schedule:
+    # 00:00 and 12:00 UTC = 05:00 and 17:00 Pakistan Standard Time (UTC+5)
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: air-quality-etl
+  cancel-in-progress: false
+
+jobs:
+  run-etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run ETL pipeline
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python main.py
