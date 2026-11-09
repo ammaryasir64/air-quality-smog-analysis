@@ -6,6 +6,8 @@ EXTRACT stage of the ETL pipeline.
 Fetches current conditions and hourly air-quality data for each city from the
 Open-Meteo Air Quality API and saves the raw JSON response per city.
 
+Cities that fail in the first pass get ONE second chance after a short pause.
+
 IMPORTANT: Values are MODEL-BASED ESTIMATES (CAMS atmospheric model), not
 direct ground-station measurements.
 """
@@ -28,9 +30,12 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = PROJECT_ROOT / "data" / "raw_api"
 
+SECOND_CHANCE_PAUSE_SECONDS = 30
 
-def fetch_city(city, latitude, longitude):
+
+def fetch_city(city, latitude, longitude, max_retries=None):
     """Call the API for one city. Retries on timeouts, rate limits and server errors."""
+    attempts = max_retries or config.MAX_RETRIES
     params = {
         "latitude": latitude,
         "longitude": longitude,
@@ -42,7 +47,7 @@ def fetch_city(city, latitude, longitude):
     }
 
     last_error = None
-    for attempt in range(1, config.MAX_RETRIES + 1):
+    for attempt in range(1, attempts + 1):
         try:
             response = requests.get(
                 config.API_URL, params=params, timeout=config.REQUEST_TIMEOUT_SECONDS
@@ -58,13 +63,11 @@ def fetch_city(city, latitude, longitude):
             return data
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
-            logger.warning(
-                "%s: attempt %d/%d failed: %s", city, attempt, config.MAX_RETRIES, exc
-            )
-            if attempt < config.MAX_RETRIES:
+            logger.warning("%s: attempt %d/%d failed: %s", city, attempt, attempts, exc)
+            if attempt < attempts:
                 time.sleep(config.RETRY_BACKOFF_SECONDS * attempt)
 
-    raise RuntimeError(f"{city}: all {config.MAX_RETRIES} attempts failed: {last_error}")
+    raise RuntimeError(f"{city}: all {attempts} attempts failed: {last_error}")
 
 
 def save_raw_json(city, data, fetched_at):
@@ -88,6 +91,22 @@ def save_raw_json(city, data, fetched_at):
     return path
 
 
+def _fetch_and_store(city, fetched_at, max_retries=None):
+    """Fetch one city, save its JSON, and return the result dict."""
+    lat, lon, province = config.CITIES[city]
+    data = fetch_city(city, lat, lon, max_retries=max_retries)
+    path = save_raw_json(city, data, fetched_at)
+    logger.info("%s: fetched OK, saved %s", city, path.name)
+    return {
+        "city": city,
+        "province": province,
+        "latitude": lat,
+        "longitude": lon,
+        "fetched_at": fetched_at,
+        "data": data,
+    }
+
+
 def extract_all():
     """
     Fetch all cities. Returns a list of dicts:
@@ -98,25 +117,31 @@ def extract_all():
     results = []
     failed = []
 
-    for city, (lat, lon, province) in config.CITIES.items():
+    # Pass 1: every city, full retries.
+    for city in config.CITIES:
         try:
-            data = fetch_city(city, lat, lon)
-            path = save_raw_json(city, data, fetched_at)
-            logger.info("%s: fetched OK, saved %s", city, path.name)
-            results.append(
-                {
-                    "city": city,
-                    "province": province,
-                    "latitude": lat,
-                    "longitude": lon,
-                    "fetched_at": fetched_at,
-                    "data": data,
-                }
-            )
+            results.append(_fetch_and_store(city, fetched_at))
         except Exception as exc:
             logger.error("%s: FAILED: %s", city, exc)
             failed.append(city)
         time.sleep(config.PAUSE_BETWEEN_CITIES_SECONDS)
+
+    # Pass 2: one second chance (single attempt) for cities that failed.
+    if failed and len(failed) < len(config.CITIES):
+        logger.info(
+            "Second chance for %d city(ies) after %d s pause: %s",
+            len(failed), SECOND_CHANCE_PAUSE_SECONDS, ", ".join(failed),
+        )
+        time.sleep(SECOND_CHANCE_PAUSE_SECONDS)
+        still_failed = []
+        for city in failed:
+            try:
+                results.append(_fetch_and_store(city, fetched_at, max_retries=1))
+            except Exception as exc:
+                logger.error("%s: FAILED again in second chance: %s", city, exc)
+                still_failed.append(city)
+            time.sleep(config.PAUSE_BETWEEN_CITIES_SECONDS)
+        failed = still_failed
 
     if not results:
         raise RuntimeError("Extract failed for ALL cities. Stopping pipeline.")
