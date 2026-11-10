@@ -263,6 +263,7 @@ elif page == PAGES[2]:
                          range_color=(0, 300), zoom=4.3, map_style="carto-darkmatter",
                          labels={"us_aqi": "US AQI"}, title="US AQI by city")
     fig.update_traces(marker=dict(size=18))
+    fig.update_layout(map=dict(center=dict(lat=30.3, lon=69.3), zoom=4.4))
     st.plotly_chart(style(fig, 560))
     t = current[["city", "province", "us_aqi", "european_aqi", "pm2_5", "pm10", "fetched_at"]].sort_values(
         "us_aqi", ascending=False)
