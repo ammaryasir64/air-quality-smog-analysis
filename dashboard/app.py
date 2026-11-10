@@ -3,8 +3,9 @@ dashboard/app.py
 
 Streamlit dashboard: Air Quality & Smog Analysis for 20 Pakistani cities.
 
-Data source: Supabase table `current_air_quality` (written by the ETL pipeline).
-The dashboard uses the read-only publishable key (SUPABASE_ANON_KEY).
+Data sources (Supabase, read-only publishable key SUPABASE_ANON_KEY):
+  - current_air_quality : latest stored reading per city (cards, rankings)
+  - air_quality         : hourly records (hourly chart)
 
 IMPORTANT: Values are MODEL-BASED ESTIMATES (Open-Meteo / CAMS atmospheric
 model), not direct ground-station measurements.
@@ -15,6 +16,8 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client
@@ -33,6 +36,7 @@ st.set_page_config(
 
 CACHE_SECONDS = 300
 LOCAL_TZ = "Asia/Karachi"
+HOURLY_ROW_LIMIT = 500  # latest 500 hourly rows per city
 
 POLLUTANT_CARDS = [
     ("pm2_5", "PM2.5", "µg/m³"),
@@ -42,6 +46,18 @@ POLLUTANT_CARDS = [
     ("nitrogen_dioxide", "Nitrogen Dioxide (NO₂)", "µg/m³"),
     ("ozone", "Ozone (O₃)", "µg/m³"),
 ]
+POLLUTANT_LABELS = {key: label for key, label, _ in POLLUTANT_CARDS}
+POLLUTANT_UNITS = {key: unit for key, _, unit in POLLUTANT_CARDS}
+
+CATEGORY_COLORS = {
+    "Good": "#22c55e",
+    "Moderate": "#eab308",
+    "Unhealthy for Sensitive Groups": "#f97316",
+    "Unhealthy": "#ef4444",
+    "Very Unhealthy": "#a855f7",
+    "Hazardous": "#9f1239",
+    "No data": "#94a3b8",
+}
 
 CSS = """
 <style>
@@ -94,20 +110,42 @@ def load_current():
     return df
 
 
+@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Loading hourly data...")
+def load_hourly(city):
+    """Latest hourly rows for one city (table: air_quality)."""
+    rows = (
+        get_client()
+        .table("air_quality")
+        .select("time,us_aqi,european_aqi")
+        .eq("city", city)
+        .order("time", desc=True)
+        .limit(HOURLY_ROW_LIMIT)
+        .execute()
+        .data
+    )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["time"] = pd.to_datetime(df["time"])
+    return df.sort_values("time").reset_index(drop=True)
+
+
 def us_aqi_category(value):
     if pd.isna(value):
-        return "No data", "#94a3b8"
+        return "No data", CATEGORY_COLORS["No data"]
     if value <= 50:
-        return "Good", "#22c55e"
-    if value <= 100:
-        return "Moderate", "#eab308"
-    if value <= 150:
-        return "Unhealthy for Sensitive Groups", "#f97316"
-    if value <= 200:
-        return "Unhealthy", "#ef4444"
-    if value <= 300:
-        return "Very Unhealthy", "#a855f7"
-    return "Hazardous", "#9f1239"
+        label = "Good"
+    elif value <= 100:
+        label = "Moderate"
+    elif value <= 150:
+        label = "Unhealthy for Sensitive Groups"
+    elif value <= 200:
+        label = "Unhealthy"
+    elif value <= 300:
+        label = "Very Unhealthy"
+    else:
+        label = "Hazardous"
+    return label, CATEGORY_COLORS[label]
 
 
 def european_aqi_category(value):
@@ -132,6 +170,17 @@ def fmt(value, decimals=1):
 
 def fmt_time(ts):
     return "N/A" if pd.isna(ts) else ts.strftime("%d %b %Y, %I:%M %p")
+
+
+def style_figure(fig, height=480):
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        height=height,
+        margin=dict(l=10, r=10, t=50, b=10),
+    )
+    return fig
 
 
 # ---------------------------------------------------------------- page
@@ -191,6 +240,103 @@ for start in range(0, len(POLLUTANT_CARDS), 3):
             "</div>"
         )
         col.markdown(card, unsafe_allow_html=True)
+
+# ---- Charts
+st.subheader("Analysis")
+tab_hourly, tab_rank, tab_poll = st.tabs(
+    ["📈 Hourly AQI", "🏆 City Rankings", "🧪 Pollutant Comparison"]
+)
+
+# Tab 1: hourly AQI for the selected city (table: air_quality)
+with tab_hourly:
+    try:
+        hourly = load_hourly(city)
+    except Exception as exc:
+        hourly = None
+        st.error(f"Could not load hourly data: {exc}")
+
+    if hourly is not None:
+        hourly = hourly.dropna(subset=["us_aqi"])
+        if hourly.empty:
+            st.info(f"No hourly records stored for {city} yet.")
+        else:
+            now_local = pd.Timestamp.now(tz=LOCAL_TZ).tz_localize(None)
+            past = hourly[hourly["time"] <= now_local]
+            future = hourly[hourly["time"] > now_local]
+            if not past.empty and not future.empty:
+                # connect the two lines so there is no visual gap
+                future = pd.concat([past.tail(1), future])
+
+            fig = go.Figure()
+            if not past.empty:
+                fig.add_trace(go.Scatter(
+                    x=past["time"], y=past["us_aqi"], mode="lines",
+                    name="Stored model data (past)",
+                    line=dict(color="#38bdf8", width=3)))
+            if not future.empty:
+                fig.add_trace(go.Scatter(
+                    x=future["time"], y=future["us_aqi"], mode="lines",
+                    name="Model forecast",
+                    line=dict(color="#a78bfa", width=3, dash="dash")))
+            for limit in (50, 100, 150, 200):
+                fig.add_hline(y=limit, line_dash="dot", line_color="#334155", line_width=1)
+            fig.update_layout(
+                title=f"Hourly US AQI: {city} (Asia/Karachi time)",
+                xaxis_title="Time (PKT)", yaxis_title="US AQI",
+                legend=dict(orientation="h", y=-0.2),
+            )
+            st.plotly_chart(style_figure(fig), use_container_width=True)
+            st.caption(
+                "Dotted lines mark US AQI category limits (50, 100, 150, 200). The dashed "
+                "line shows model FORECAST hours, not recorded readings. "
+                f"Showing up to the latest {HOURLY_ROW_LIMIT} stored hourly rows."
+            )
+
+# Tab 2: ranking of all 20 cities (table: current_air_quality)
+with tab_rank:
+    rank = current[["city", "province", "us_aqi", "european_aqi"]].dropna(subset=["us_aqi"]).copy()
+    rank["category"] = rank["us_aqi"].apply(lambda v: us_aqi_category(v)[0])
+    rank = rank.sort_values("us_aqi", ascending=False).reset_index(drop=True)
+
+    if city in rank["city"].tolist():
+        position = rank.index[rank["city"] == city][0] + 1
+        st.markdown(
+            f"**{city}** is ranked **#{position} of {len(rank)}** "
+            "(1 = highest US AQI, most polluted)."
+        )
+
+    fig = px.bar(
+        rank.sort_values("us_aqi"), x="us_aqi", y="city", orientation="h",
+        color="category", color_discrete_map=CATEGORY_COLORS, text="us_aqi",
+        hover_data={"province": True, "european_aqi": True, "category": False},
+        title="Latest US AQI by city",
+        labels={"us_aqi": "US AQI", "city": "", "european_aqi": "European AQI"},
+    )
+    fig.update_traces(texttemplate="%{x:.0f}", textposition="outside")
+    fig.update_layout(legend_title_text="US AQI category")
+    st.plotly_chart(style_figure(fig, height=640), use_container_width=True)
+
+# Tab 3: compare one pollutant across all 20 cities (table: current_air_quality)
+with tab_poll:
+    pollutant = st.selectbox(
+        "Pollutant", list(POLLUTANT_LABELS.keys()),
+        format_func=lambda k: POLLUTANT_LABELS[k], key="pollutant_select",
+    )
+    comp = current[["city", pollutant]].dropna().sort_values(pollutant).copy()
+    comp["highlight"] = comp["city"].eq(city).map(
+        {True: "Selected city", False: "Other cities"}
+    )
+    fig = px.bar(
+        comp, x=pollutant, y="city", orientation="h", color="highlight",
+        color_discrete_map={"Selected city": "#f59e0b", "Other cities": "#38bdf8"},
+        text=pollutant,
+        title=f"{POLLUTANT_LABELS[pollutant]} by city ({POLLUTANT_UNITS[pollutant]})",
+        labels={pollutant: POLLUTANT_UNITS[pollutant], "city": ""},
+    )
+    fig.update_traces(texttemplate="%{x:.1f}", textposition="outside")
+    fig.update_layout(legend_title_text="")
+    st.plotly_chart(style_figure(fig, height=640), use_container_width=True)
+    st.caption("Each pollutant is shown on its own scale; pollutants are not mixed in one chart.")
 
 # ---- Freshness + disclaimer
 st.divider()
