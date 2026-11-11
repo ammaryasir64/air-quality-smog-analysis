@@ -268,7 +268,22 @@ elif page == PAGES[2]:
     t = current[["city", "province", "us_aqi", "european_aqi", "pm2_5", "pm10", "fetched_at"]].sort_values(
         "us_aqi", ascending=False)
     t["fetched_at"] = t["fetched_at"].dt.strftime("%d %b %I:%M %p")
-    st.dataframe(t, hide_index=True)
+    t.columns = ["City", "Province", "US AQI", "European AQI",
+                 "PM2.5 (µg/m³)", "PM10 (µg/m³)", "Fetched (PKT)"]
+    table_html = t.to_html(index=False, border=0, na_rep="Data Not Available",
+                           float_format=lambda v: f"{v:.1f}", classes="aq-table")
+    st.markdown(
+        "<style>.aq-table{width:100%;border-collapse:collapse;font-size:.85rem;color:#e2e8f0}"
+        ".aq-table th{text-align:left;padding:8px 10px;color:#94a3b8;"
+        "border-bottom:1px solid rgba(56,189,248,.25)}"
+        ".aq-table td{padding:7px 10px;border-bottom:1px solid rgba(148,163,184,.1)}"
+        ".aq-table tr:hover td{background:rgba(56,189,248,.08)}</style>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="glass" style="overflow-x:auto">' + table_html.replace("\n", "") + "</div>",
+        unsafe_allow_html=True,
+    )
 
 elif page == PAGES[3]:
     st.title("Smog Analysis")
