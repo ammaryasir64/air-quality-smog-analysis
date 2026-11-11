@@ -51,6 +51,14 @@ ADVICE = {
     "Very Unhealthy": "Health alert. Avoid outdoor activity; sensitive groups should stay indoors.",
     "Hazardous": "Emergency conditions. Everyone should avoid outdoor exertion.",
 }
+RANGES = {
+    "Good": "0 to 50",
+    "Moderate": "51 to 100",
+    "Unhealthy for Sensitive Groups": "101 to 150",
+    "Unhealthy": "151 to 200",
+    "Very Unhealthy": "201 to 300",
+    "Hazardous": "301 and above",
+}
 
 
 def get_setting(name):
@@ -339,8 +347,8 @@ elif page == PAGES[6]:
     st.markdown(theme.glass_card(f"{city} right now", cat, f"US AQI {fmt(row['us_aqi'], 0)}",
                                  ADVICE.get(cat, ""), color), unsafe_allow_html=True)
     for name in ORDER:
-        st.markdown(theme.glass_card(name, "", "", ADVICE[name], COLORS[name]).replace(
-            '<div class="g-value"></div>', ''), unsafe_allow_html=True)
+        st.markdown(theme.glass_card(name, RANGES[name], "US AQI range", ADVICE[name], COLORS[name]),
+                    unsafe_allow_html=True)
 
 else:
     st.title("Alerts")
