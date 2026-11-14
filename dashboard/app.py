@@ -257,11 +257,12 @@ elif page == PAGES[1]:
         st.plotly_chart(hourly_fig(hourly.dropna(subset=["us_aqi"]), city))
     sel = st.selectbox("Compare one pollutant across all cities", list(LABELS), format_func=LABELS.get)
     st.plotly_chart(bar_cities(current, sel, f"{LABELS[sel]} by city (µg/m³)", city, fmt_str="%{x:.1f}"))
-    pm = current[["city", "pm2_5", "pm10"]].dropna().sort_values("pm2_5", ascending=False)
-    fig = px.bar(pm.melt("city", var_name="pollutant", value_name="µg/m³"), x="city", y="µg/m³",
-                 color="pollutant", barmode="group", title="PM2.5 and PM10 by city (µg/m³)")
-    fig.update_xaxes(tickangle=60, dtick=1)
-    st.plotly_chart(style(fig, 560))
+    pm = current[["city", "pm2_5", "pm10"]].dropna().sort_values("pm2_5")
+    fig = px.bar(pm.melt("city", var_name="pollutant", value_name="µg/m³"), x="µg/m³", y="city",
+                 orientation="h", color="pollutant", barmode="group",
+                 title="PM2.5 and PM10 by city (µg/m³)")
+    fig.update_yaxes(dtick=1, categoryorder="array", categoryarray=pm["city"].tolist())
+    st.plotly_chart(style(fig, max(560, 30 * len(pm))))
 
 elif page == PAGES[2]:
     st.title("Live Monitoring")
