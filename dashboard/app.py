@@ -160,13 +160,15 @@ def hourly_fig(hourly, city, past=True, future=True):
     return style(fig)
 
 
-def bar_cities(df, col, title, highlight, h=620, fmt_str="%{x:.0f}"):
+def bar_cities(df, col, title, highlight, h=None, fmt_str="%{x:.0f}"):
     d = df[["city", col]].dropna().sort_values(col).copy()
+    h = h or max(420, 20 * len(d))
     d["group"] = d["city"].eq(highlight).map({True: "Selected city", False: "Other cities"})
     fig = px.bar(d, x=col, y="city", orientation="h", color="group", text=col, title=title,
                  color_discrete_map={"Selected city": "#f59e0b", "Other cities": "#38bdf8"},
                  labels={col: "", "city": ""})
     fig.update_traces(texttemplate=fmt_str, textposition="outside")
+    fig.update_yaxes(dtick=1)
     fig.update_layout(legend_title_text="")
     return style(fig, h)
 
@@ -184,7 +186,8 @@ if current.empty:
 with st.sidebar:
     st.markdown("### 🌫️ Pakistan Air Quality")
     page = st.radio("Navigation", PAGES, label_visibility="collapsed")
-    city = st.selectbox("City", list(config.CITIES.keys()))
+    cities_sorted = sorted(config.CITIES)
+    city = st.selectbox("City", cities_sorted, index=cities_sorted.index("Lahore"))
     if st.button("🔄 Refresh data"):
         st.cache_data.clear()
         st.rerun()
@@ -257,7 +260,8 @@ elif page == PAGES[1]:
     pm = current[["city", "pm2_5", "pm10"]].dropna().sort_values("pm2_5", ascending=False)
     fig = px.bar(pm.melt("city", var_name="pollutant", value_name="µg/m³"), x="city", y="µg/m³",
                  color="pollutant", barmode="group", title="PM2.5 and PM10 by city (µg/m³)")
-    st.plotly_chart(style(fig))
+    fig.update_xaxes(tickangle=60, dtick=1)
+    st.plotly_chart(style(fig, 560))
 
 elif page == PAGES[2]:
     st.title("Live Monitoring")
@@ -370,3 +374,20 @@ st.markdown(f'<p class="note"><b>Last Updated:</b> {fmt_time(row["fetched_at"])}
             'database and does not call Open-Meteo.</p>', unsafe_allow_html=True)
 st.info("**Data source:** Open-Meteo Air Quality API (CAMS atmospheric model). Values are model-based "
         "estimates, not direct ground-station measurements, and not guaranteed minute-by-minute live readings.")
+with st.expander("Why can these values differ from official ground-station AQI?"):
+    st.markdown(
+        "- **Model vs. sensors:** this dashboard shows model-based estimates (Open-Meteo / CAMS), "
+        "one value per city for the city-centre coordinates. Official dashboards use ground "
+        "stations placed at specific spots.\n"
+        "- **Resolution:** the model grid covers many kilometres, so local hotspots (busy roads, "
+        "industrial areas) can look lower than a station reading. Nearby cities may show almost "
+        "identical values.\n"
+        "- **AQI value:** the US AQI shown is supplied by Open-Meteo and is not recalculated here. "
+        "It may not match the AQI you would work out from the PM2.5 value shown.\n"
+        "- **Labels:** some local dashboards use different category names or breakpoints, so the "
+        "same number can carry a different label. This dashboard uses the US EPA scale "
+        "(Hazardous starts at 301).\n"
+        "- **Timing:** data is fetched by the ETL pipeline (every 12 hours) from model output, "
+        "not minute-by-minute sensor feeds.\n"
+        "- For official health decisions, check your local environmental agency's station data."
+    )
