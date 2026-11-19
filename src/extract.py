@@ -1,24 +1,32 @@
 """
 extract.py
 
-EXTRACT stage of the ETL pipeline.
+EXTRACT stage of the ETL pipeline (OpenWeather Air Pollution API).
 
-Fetches current conditions and hourly air-quality data for each city from the
-Open-Meteo Air Quality API and saves the raw JSON response per city.
+For every city it fetches three things:
+  - current   : the latest reading
+  - history   : hourly readings for the last N days
+  - forecast  : the 4-day hourly forecast
+and saves the raw responses of each city as one JSON file in
+data/raw_openweather/<City>/.
 
-Cities that fail in the first pass get ONE second chance after a short pause.
+The API key comes from the environment variable OPENWEATHER_API_KEY
+(.env locally, GitHub Secrets in Actions). It is never saved in JSON files
+and never written to logs.
 
-IMPORTANT: Values are MODEL-BASED ESTIMATES (CAMS atmospheric model), not
-direct ground-station measurements.
+IMPORTANT: Values are MODEL-BASED ESTIMATES (OpenWeather uses the SILAM model),
+not direct ground-station measurements.
 """
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
 try:
     import config
@@ -28,61 +36,87 @@ except ImportError:  # when imported as src.extract
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RAW_DIR = PROJECT_ROOT / "data" / "raw_api"
-
+RAW_DIR = PROJECT_ROOT / "data" / "raw_openweather"
 SECOND_CHANCE_PAUSE_SECONDS = 30
 
 
-def fetch_city(city, latitude, longitude, max_retries=None):
-    """Call the API for one city. Retries on timeouts, rate limits and server errors."""
-    attempts = max_retries or config.MAX_RETRIES
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current": ",".join(config.CURRENT_VARIABLES),
-        "hourly": ",".join(config.HOURLY_VARIABLES),
-        "timezone": config.TIMEZONE,
-        "past_days": config.PAST_DAYS,
-        "forecast_days": config.FORECAST_DAYS,
-    }
+class ApiKeyError(RuntimeError):
+    """The key is missing or was rejected. Trying the other cities is pointless."""
 
-    last_error = None
+
+def get_api_key():
+    load_dotenv(PROJECT_ROOT / ".env")
+    key = (os.getenv(config.API_KEY_ENV_VAR) or "").strip()
+    if not key:
+        raise ApiKeyError(
+            f"{config.API_KEY_ENV_VAR} is missing (.env locally, GitHub Secret in Actions)"
+        )
+    return key
+
+
+def api_get(path, params, key, attempts):
+    """One API call with retries. Returns the list of hourly rows."""
+    last = None
     for attempt in range(1, attempts + 1):
         try:
             response = requests.get(
-                config.API_URL, params=params, timeout=config.REQUEST_TIMEOUT_SECONDS
+                config.API_BASE_URL + path,
+                params={**params, "appid": key},
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
             )
+            if response.status_code in (401, 403):
+                raise ApiKeyError(f"HTTP {response.status_code}: API key rejected or not allowed")
             if response.status_code == 429 or response.status_code >= 500:
-                raise requests.HTTPError(
+                raise requests.RequestException(
                     f"HTTP {response.status_code} (rate limit or server error)"
                 )
             response.raise_for_status()
-            data = response.json()
-            if "hourly" not in data or "current" not in data:
-                raise ValueError("API response is missing 'hourly' or 'current'")
-            return data
+            rows = response.json().get("list")
+            if not isinstance(rows, list):
+                raise ValueError("response has no 'list'")
+            return rows
+        except ApiKeyError:
+            raise
         except (requests.RequestException, ValueError) as exc:
-            last_error = exc
-            logger.warning("%s: attempt %d/%d failed: %s", city, attempt, attempts, exc)
+            last = str(exc).replace(key, "***")  # never leak the key
+            logger.warning(
+                "%s: attempt %d/%d failed: %s", path or "/current", attempt, attempts, last
+            )
             if attempt < attempts:
                 time.sleep(config.RETRY_BACKOFF_SECONDS * attempt)
+    raise RuntimeError(f"all {attempts} attempts failed: {last}")
 
-    raise RuntimeError(f"{city}: all {attempts} attempts failed: {last_error}")
+
+def fetch_city(latitude, longitude, key, days, attempts):
+    """Current + history + forecast for one city (3 API calls)."""
+    now = int(time.time())
+    base = {"lat": latitude, "lon": longitude}
+
+    current = api_get("", base, key, attempts)
+    time.sleep(config.PAUSE_BETWEEN_CALLS_SECONDS)
+    history = api_get("/history", {**base, "start": now - days * 86400, "end": now}, key, attempts)
+    time.sleep(config.PAUSE_BETWEEN_CALLS_SECONDS)
+    forecast = api_get("/forecast", base, key, attempts)
+
+    if not current or not history:
+        raise ValueError("API returned no current or history rows")
+    return {"current": current, "history": history, "forecast": forecast}
 
 
-def save_raw_json(city, data, fetched_at):
-    """Save one raw API response as JSON inside data/raw_api/<city>/."""
+def save_raw_json(city, data, fetched_at, days):
+    """Save one city's raw responses as JSON (no secrets inside)."""
     city_dir = RAW_DIR / city
     city_dir.mkdir(parents=True, exist_ok=True)
     stamp = fetched_at.strftime("%Y%m%dT%H%M%SZ")
     path = city_dir / f"{city}_{stamp}.json"
-
     payload = {
         "metadata": {
             "city": city,
-            "source": config.API_URL,
+            "source": config.API_BASE_URL,
             "fetched_at_utc": fetched_at.isoformat(),
-            "note": "Model-based estimates (CAMS), not ground-station measurements.",
+            "history_days": days,
+            "note": "Model-based estimates (OpenWeather / SILAM), not ground-station "
+                    "measurements. The API key is never stored here.",
         },
         "response": data,
     }
@@ -91,57 +125,66 @@ def save_raw_json(city, data, fetched_at):
     return path
 
 
-def _fetch_and_store(city, fetched_at, max_retries=None):
-    """Fetch one city, save its JSON, and return the result dict."""
+def _fetch_and_store(city, key, days, fetched_at, attempts):
     lat, lon, province = config.CITIES[city]
-    data = fetch_city(city, lat, lon, max_retries=max_retries)
-    path = save_raw_json(city, data, fetched_at)
-    logger.info("%s: fetched OK, saved %s", city, path.name)
+    data = fetch_city(lat, lon, key, days, attempts)
+    path = save_raw_json(city, data, fetched_at, days)
+    logger.info(
+        "%s: fetched OK (current %d, history %d, forecast %d rows), saved %s",
+        city, len(data["current"]), len(data["history"]), len(data["forecast"]), path.name,
+    )
     return {
         "city": city,
         "province": province,
         "latitude": lat,
         "longitude": lon,
         "fetched_at": fetched_at,
-        "data": data,
+        **data,
     }
 
 
-def extract_all():
-    """
-    Fetch all cities. Returns a list of dicts:
-        {"city", "province", "latitude", "longitude", "fetched_at", "data"}
-    Raises RuntimeError if every city fails.
-    """
-    fetched_at = datetime.now(timezone.utc)
-    results = []
-    failed = []
-
-    # Pass 1: every city, full retries.
-    for city in config.CITIES:
+def _run_pass(names, key, days, fetched_at, attempts):
+    ok, failed = [], []
+    for city in names:
         try:
-            results.append(_fetch_and_store(city, fetched_at))
+            ok.append(_fetch_and_store(city, key, days, fetched_at, attempts))
+        except ApiKeyError:
+            raise
         except Exception as exc:
-            logger.error("%s: FAILED: %s", city, exc)
+            logger.error("%s: FAILED: %s", city, str(exc).replace(key, "***"))
             failed.append(city)
-        time.sleep(config.PAUSE_BETWEEN_CITIES_SECONDS)
+        time.sleep(config.PAUSE_BETWEEN_CALLS_SECONDS)
+    return ok, failed
 
-    # Pass 2: one second chance (single attempt) for cities that failed.
-    if failed and len(failed) < len(config.CITIES):
+
+def extract_all(history_days=None, only=None):
+    """
+    Fetch all cities (or only the given ones). Returns a list of dicts:
+        {"city", "province", "latitude", "longitude", "fetched_at",
+         "current", "history", "forecast"}
+    Raises RuntimeError if every city fails, ApiKeyError if the key is bad.
+    """
+    key = get_api_key()
+    days = history_days or config.HISTORY_DAYS
+    if not 1 <= days <= config.MAX_HISTORY_DAYS:
+        raise ValueError(f"history_days must be between 1 and {config.MAX_HISTORY_DAYS}")
+
+    names = list(only) if only else list(config.CITIES)
+    unknown = [c for c in names if c not in config.CITIES]
+    if unknown:
+        raise ValueError(f"Unknown city name(s): {', '.join(unknown)}")
+
+    fetched_at = datetime.now(timezone.utc)
+    results, failed = _run_pass(names, key, days, fetched_at, config.MAX_RETRIES)
+
+    if failed and results:
         logger.info(
             "Second chance for %d city(ies) after %d s pause: %s",
             len(failed), SECOND_CHANCE_PAUSE_SECONDS, ", ".join(failed),
         )
         time.sleep(SECOND_CHANCE_PAUSE_SECONDS)
-        still_failed = []
-        for city in failed:
-            try:
-                results.append(_fetch_and_store(city, fetched_at, max_retries=1))
-            except Exception as exc:
-                logger.error("%s: FAILED again in second chance: %s", city, exc)
-                still_failed.append(city)
-            time.sleep(config.PAUSE_BETWEEN_CITIES_SECONDS)
-        failed = still_failed
+        more, failed = _run_pass(failed, key, days, fetched_at, attempts=1)
+        results.extend(more)
 
     if not results:
         raise RuntimeError("Extract failed for ALL cities. Stopping pipeline.")
@@ -153,12 +196,20 @@ def extract_all():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Test the OpenWeather extract stage")
+    parser.add_argument("cities", nargs="*", help="city names (default: all cities)")
+    parser.add_argument("--days", type=int, default=None, help="days of history")
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    extracted = extract_all()
-    print(f"\nCities fetched: {len(extracted)}")
+    extracted = extract_all(history_days=args.days, only=args.cities or None)
     first = extracted[0]
+    print(f"\nCities fetched: {len(extracted)}")
     print("First city:", first["city"])
-    print("Current block:", first["data"]["current"])
-    print("Hourly rows:", len(first["data"]["hourly"]["time"]))
+    print("Rows -> current:", len(first["current"]), "| history:", len(first["history"]),
+          "| forecast:", len(first["forecast"]))
+    print("Latest current row:", first["current"][0])
