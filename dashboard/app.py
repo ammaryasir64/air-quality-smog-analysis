@@ -189,7 +189,7 @@ def bar_cities(df, col, title, highlight, h=None, fmt_str="%{x:.0f}"):
                  color_discrete_map={"Selected city": "#f59e0b", "Other cities": "#38bdf8"},
                  labels={col: "", "city": ""})
     fig.update_traces(texttemplate=fmt_str, textposition="outside")
-    fig.update_yaxes(dtick=1)
+    fig.update_yaxes(dtick=1, categoryorder="array", categoryarray=d["city"].tolist())
     fig.update_layout(legend_title_text="")
     return style(fig, h)
 
