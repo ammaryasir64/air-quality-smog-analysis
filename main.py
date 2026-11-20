@@ -4,13 +4,20 @@ main.py
 Runs the full ETL pipeline in order:
     Extract -> Transform -> Validate -> Load
 
+Data source: OpenWeather Air Pollution API (API key from OPENWEATHER_API_KEY).
 If any essential stage fails, the pipeline stops and exits with code 1,
 so GitHub Actions marks the run as failed.
 
-Data are MODEL-BASED ESTIMATES (Open-Meteo / CAMS), not direct
+Usage:
+    python main.py                  # regular run: 2 days of history + 4-day forecast
+    python main.py --days 22        # one-time run to load about 3 weeks of history
+    python main.py Lahore Karachi   # only these cities (for tests)
+
+Data are MODEL-BASED ESTIMATES (OpenWeather / SILAM), not direct
 ground-station measurements.
 """
 
+import argparse
 import logging
 import sys
 import time
@@ -30,11 +37,11 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
-def run_pipeline():
+def run_pipeline(history_days=None, only=None):
     started = time.time()
 
     logger.info("=== STAGE 1/4: EXTRACT ===")
-    extracted = extract.extract_all()
+    extracted = extract.extract_all(history_days=history_days, only=only)
 
     logger.info("=== STAGE 2/4: TRANSFORM ===")
     hourly_df, current_df = transform.transform_all(extracted)
@@ -46,16 +53,25 @@ def run_pipeline():
     hourly_count, current_count = load.load_all(valid_hourly, valid_current)
 
     logger.info(
-        "PIPELINE SUCCESS in %.1f s: %d hourly rows, %d current rows upserted",
+        "PIPELINE SUCCESS in %.1f s: %d cities, %d hourly rows, %d current rows upserted",
         time.time() - started,
+        len(extracted),
         hourly_count,
         current_count,
     )
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the air-quality ETL pipeline")
+    parser.add_argument("cities", nargs="*", help="city names (default: all cities)")
+    parser.add_argument(
+        "--days", type=int, default=None,
+        help="days of history to fetch (default: HISTORY_DAYS from config.py)",
+    )
+    args = parser.parse_args()
+
     try:
-        run_pipeline()
+        run_pipeline(history_days=args.days, only=args.cities or None)
     except Exception as exc:
         logger.error("PIPELINE FAILED: %s", exc)
         sys.exit(1)
