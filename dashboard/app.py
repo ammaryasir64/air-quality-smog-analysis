@@ -40,6 +40,7 @@ LOCAL_TZ = "Asia/Karachi"
 CURRENT_TABLE = "openweather_current_air_quality"
 HOURLY_TABLE = "openweather_air_quality"
 HOURLY_ROWS_PER_CITY = 700
+MIN_HOURS_PER_DAY = 18  # a day needs at least 18 hours of calculated AQI (75%) to be plotted
 
 PAGES = ["🏠 Home", "📊 Air Quality Analytics", "📡 Live Monitoring", "🌫️ Smog Analysis",
          "🕘 Historical Data", "🔮 Model Forecast", "❤️ Health Advisory", "🚨 Alerts"]
