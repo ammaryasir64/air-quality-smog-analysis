@@ -16,6 +16,7 @@ No number on this dashboard is invented.
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -32,7 +33,8 @@ import config  # noqa: E402
 import theme  # noqa: E402
 
 load_dotenv(ROOT / ".env")
-st.set_page_config(page_title="Pakistan Air Quality", page_icon="🌫️", layout="wide")
+st.set_page_config(page_title="Pakistan Air Quality", page_icon="🌫️", layout="wide",
+                   initial_sidebar_state="expanded")
 theme.inject_theme()
 
 CACHE_SECONDS = 300
@@ -42,8 +44,9 @@ HOURLY_TABLE = "openweather_air_quality"
 HOURLY_ROWS_PER_CITY = 700
 MIN_HOURS_PER_DAY = 18  # a day needs at least 18 hours of calculated AQI (75%) to be plotted
 
-PAGES = ["🏠 Home", "📊 Air Quality Analytics", "📡 Live Monitoring", "🌫️ Smog Analysis",
-         "🕘 Historical Data", "🔮 Model Forecast", "❤️ Health Advisory", "🚨 Alerts"]
+PAGES = ["Home", "Air Quality Analytics", "Live Monitoring", "Smog Analysis",
+         "Historical Data", "Model Forecast", "Health Advisory", "Alerts"]
+ICONS = ["home", "bar_chart", "sensors", "cloud", "history", "query_stats", "favorite", "notifications"]
 POLLUTANTS = [("pm2_5", "PM2.5"), ("pm10", "PM10"), ("carbon_monoxide", "Carbon Monoxide (CO)"),
               ("sulphur_dioxide", "Sulphur Dioxide (SO₂)"), ("nitrogen_dioxide", "Nitrogen Dioxide (NO₂)"),
               ("ozone", "Ozone (O₃)")]
@@ -88,7 +91,7 @@ def get_client():
     return create_client(url, key)
 
 
-@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Loading latest data...")
+@st.cache_data(ttl=CACHE_SECONDS, show_spinner=False)
 def load_current():
     df = pd.DataFrame(get_client().table(CURRENT_TABLE).select("*").execute().data)
     if df.empty:
@@ -129,6 +132,20 @@ def load_all_hourly():
     if not df.empty:
         df["time"] = pd.to_datetime(df["time"])
     return df
+
+
+def load_current_with_loader():
+    """Show the squares loading screen on the first visit, after Refresh, or when the cache is old."""
+    forced = st.session_state.pop("force_loader", False)
+    first = "loaded_at" not in st.session_state
+    stale = time.time() - st.session_state.get("loaded_at", 0) > CACHE_SECONDS
+    if forced or first or stale:
+        with theme.loading("Loading Pakistan air-quality data"):
+            data = load_current()
+    else:
+        data = load_current()
+    st.session_state["loaded_at"] = time.time()
+    return data
 
 
 def category(v):
@@ -195,9 +212,41 @@ def bar_cities(df, col, title, highlight, h=None, fmt_str="%{x:.0f}"):
     return style(fig, h)
 
 
-# ------------------------------------------------------------ sidebar
+# ------------------------------------------------------------ navigation state
+st.session_state.setdefault("page", PAGES[0])
+st.session_state.setdefault("nav_open", False)
+
+
+def toggle_nav():
+    st.session_state.nav_open = not st.session_state.nav_open
+
+
+def go_to(name):
+    st.session_state.page = name
+
+
+def refresh_data():
+    st.cache_data.clear()
+    st.session_state["force_loader"] = True
+
+
+st.markdown(theme.nav_css(st.session_state.nav_open), unsafe_allow_html=True)
+
+# ------------------------------------------------------------ sidebar: icon rail + menu button
+open_ = st.session_state.nav_open
+with st.sidebar:
+    st.button("Close menu" if open_ else " ",
+              icon=":material/menu_open:" if open_ else ":material/menu:",
+              key="nav_toggle", on_click=toggle_nav, help="Show or hide the menu")
+    for name, icon in zip(PAGES, ICONS):
+        st.button(name if open_ else " ", icon=f":material/{icon}:", key=f"nav_{name}",
+                  on_click=go_to, args=(name,), help=name,
+                  type="primary" if st.session_state.page == name else "secondary")
+page = st.session_state.page
+
+# ------------------------------------------------------------ data
 try:
-    current = load_current()
+    current = load_current_with_loader()
 except Exception as exc:
     st.error(f"Could not load data from Supabase: {exc}")
     st.stop()
@@ -205,15 +254,16 @@ if current.empty:
     st.warning("No data in the OpenWeather tables yet. Run the ETL pipeline first.")
     st.stop()
 
-with st.sidebar:
-    st.markdown("### 🌫️ Pakistan Air Quality")
-    page = st.radio("Navigation", PAGES, label_visibility="collapsed")
-    cities_sorted = sorted(config.CITIES)
-    city = st.selectbox("City", cities_sorted, index=cities_sorted.index("Lahore"))
-    if st.button("🔄 Refresh data"):
-        st.cache_data.clear()
-        st.rerun()
-    st.caption(f"Latest stored record: {fmt_time(current['fetched_at'].max())} (PKT)")
+# ------------------------------------------------------------ header: brand, city selector, refresh
+cities_sorted = sorted(config.CITIES)
+head_a, head_b, head_c = st.columns([3, 2, 1])
+head_a.markdown(
+    f'<div class="brand">🌫️ Pakistan Air Quality'
+    f'<span>Latest stored record: {fmt_time(current["fetched_at"].max())} (PKT)</span></div>',
+    unsafe_allow_html=True)
+city = head_b.selectbox("City", cities_sorted, index=cities_sorted.index("Lahore"),
+                        key="city", label_visibility="collapsed")
+head_c.button("Refresh", icon=":material/refresh:", on_click=refresh_data)
 
 match = current[current["city"] == city]
 if match.empty:
@@ -350,15 +400,27 @@ elif page == PAGES[4]:
         st.caption(f"Stored history covers {days} day(s) (calculated US AQI from model data). "
                    "Monthly or yearly trends need many more days of data.")
         picks = st.multiselect("Compare cities", sorted(config.CITIES), default=[city])
-        daily = (past[past["city"].isin(picks)].assign(day=lambda d: d["time"].dt.date)
-                 .groupby(["day", "city"])["us_aqi_calc"].mean().round(1).reset_index())
-        if daily.empty:
+        if not picks:
             st.info("Select at least one city.")
         else:
+            counts = (past[past["city"].isin(picks)].assign(day=lambda d: d["time"].dt.date)
+                      .groupby(["day", "city"])["us_aqi_calc"].agg(["mean", "count"]).reset_index())
+            complete = counts[counts["count"] >= MIN_HOURS_PER_DAY].copy()
+            complete["us_aqi_calc"] = complete["mean"].round(1)
+            all_days = pd.date_range(past["time"].dt.date.min(), past["time"].dt.date.max()).date
+            grid = pd.MultiIndex.from_product([all_days, picks], names=["day", "city"])
+            daily = complete.set_index(["day", "city"])[["us_aqi_calc"]].reindex(grid).reset_index()
             fig = px.line(daily, x="day", y="us_aqi_calc", color="city", markers=True,
-                          title="Daily average US AQI (calculated)", labels={"us_aqi_calc": "US AQI (calculated)"})
+                          title="Daily average US AQI (calculated)",
+                          labels={"us_aqi_calc": "US AQI (calculated)"})
             st.plotly_chart(style(fig))
-            st.caption("Today's average covers only the hours stored so far.")
+            left_out = sorted(counts.loc[counts["count"] < MIN_HOURS_PER_DAY, "day"].unique())
+            note = (f"Only days with at least {MIN_HOURS_PER_DAY} hours of calculated AQI are plotted; "
+                    "a break in the line means missing or incomplete data.")
+            if left_out:
+                note += " Days left out for the selected cities: " + ", ".join(
+                    d.strftime("%d %b") for d in left_out) + "."
+            st.caption(note)
 
 elif page == PAGES[5]:
     st.title("Model Forecast")
