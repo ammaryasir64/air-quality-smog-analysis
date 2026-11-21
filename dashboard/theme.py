@@ -1,17 +1,16 @@
 """
 dashboard/theme.py
 
-Aeris-inspired visual theme for the Streamlit dashboard (CSS only).
-
-- Deep navy background, cyan/blue glow, subtle purple and green accents
-- Glass cards with glowing borders, hover lift and hover-reveal details
-- Animated circular AQI gauge, entrance animations, floating glowing dots
-- Styled left sidebar and tabs
+Aeris-inspired visual theme for the Streamlit dashboard (CSS only), plus:
+  - nav_css(): an icon-rail sidebar that widens when the menu button is pressed
+  - loading() / loader_html(): a loading screen made of changing squares, in the
+    dashboard colours (navy, cyan, purple, green)
 
 This file contains NO data. All numbers shown come from the Supabase tables.
 """
 
 import math
+from contextlib import contextmanager
 
 CSS = """
 <style>
@@ -53,18 +52,8 @@ h2, h3 {font-weight: 700 !important; color: #e2e8f0 !important;}
 
 /* sidebar */
 section[data-testid="stSidebar"] {
-  background: rgba(7,14,29,.88); backdrop-filter: blur(16px);
+  background: rgba(7,14,29,.92); backdrop-filter: blur(16px);
   border-right: 1px solid rgba(56,189,248,.2);
-}
-section[data-testid="stSidebar"] label {color: #cbd5e1 !important;}
-section[data-testid="stSidebar"] [role="radiogroup"] label {
-  background: rgba(56,189,248,.05); border: 1px solid rgba(56,189,248,.12);
-  border-radius: 12px; padding: 8px 12px; margin-bottom: 6px;
-  transition: all .25s ease;
-}
-section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
-  background: rgba(56,189,248,.14); border-color: rgba(56,189,248,.5);
-  box-shadow: 0 0 16px rgba(56,189,248,.22); transform: translateX(3px);
 }
 
 /* buttons */
@@ -128,8 +117,33 @@ section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
 .pill {display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: .78rem;
        font-weight: 600; border: 1px solid; margin-right: 6px;}
 .note {color: #94a3b8; font-size: .8rem;}
+
+/* header brand */
+.brand {color: #e2e8f0; font-weight: 800; font-size: 1.1rem; line-height: 1.3; padding-top: 4px;}
+.brand span {display: block; color: #64748b; font-size: .75rem; font-weight: 500;}
 </style>
 """
+
+LOADER_CSS = (
+    "<style>"
+    ".ld-overlay{position:fixed;inset:0;z-index:1000000;display:flex;flex-direction:column;"
+    "align-items:center;justify-content:center;gap:26px;"
+    "background:radial-gradient(900px 500px at 10% -10%,rgba(56,189,248,.16),transparent 60%),"
+    "radial-gradient(800px 500px at 100% 0%,rgba(139,92,246,.14),transparent 55%),#050b16;}"
+    ".ld-grid{display:grid;grid-template-columns:repeat(16,18px);gap:6px;max-width:92vw;}"
+    ".ld-sq{width:18px;height:18px;border-radius:4px;background:#12203a;"
+    "animation:ld-pulse 2.6s ease-in-out infinite;}"
+    "@keyframes ld-pulse{0%,100%{background:#12203a;transform:scale(.82);box-shadow:none}"
+    "25%{background:#38bdf8;transform:scale(1);box-shadow:0 0 10px rgba(56,189,248,.6)}"
+    "50%{background:#a78bfa;transform:scale(.95);box-shadow:0 0 10px rgba(167,139,250,.5)}"
+    "75%{background:#22c55e;transform:scale(1);box-shadow:0 0 10px rgba(34,197,94,.5)}}"
+    ".ld-text{color:#94a3b8;font-family:'Plus Jakarta Sans',sans-serif;font-size:.95rem;"
+    "letter-spacing:.06em;animation:ld-fade 1.6s ease-in-out infinite;}"
+    "@keyframes ld-fade{0%,100%{opacity:.55}50%{opacity:1}}"
+    "@media (max-width:480px){.ld-grid{grid-template-columns:repeat(16,13px);gap:4px}"
+    ".ld-sq{width:13px;height:13px}}"
+    "</style>"
+)
 
 
 def inject_theme():
@@ -137,6 +151,60 @@ def inject_theme():
     import streamlit as st
 
     st.markdown(CSS, unsafe_allow_html=True)
+
+
+def nav_css(is_open):
+    """CSS for the icon-rail sidebar. Narrow when closed, wide (with labels) when open."""
+    width = 250 if is_open else 84
+    align = "flex-start" if is_open else "center"
+    sb = 'section[data-testid="stSidebar"]'
+    return (
+        "<style>"
+        f"{sb}{{width:{width}px !important;min-width:{width}px !important;"
+        f"max-width:{width}px !important;transition:width .25s ease;}}"
+        f'{sb} [data-testid="stSidebarHeader"],{sb} [data-testid="stSidebarCollapseButton"]'
+        "{display:none !important;}"
+        f'{sb} [data-testid="stButton"],{sb} .stButton{{width:100% !important;margin-bottom:.15rem;}}'
+        f"{sb} .stButton>button{{width:100%;justify-content:{align};gap:12px;min-height:46px;"
+        "padding:.55rem .75rem;border-radius:14px;border:1px solid transparent;"
+        "background:transparent;color:#94a3b8;box-shadow:none;}"
+        f"{sb} .stButton>button:hover{{background:rgba(56,189,248,.12);"
+        "border-color:rgba(56,189,248,.35);color:#e2e8f0;"
+        "box-shadow:0 0 16px rgba(56,189,248,.18);transform:none;}"
+        f'{sb} .stButton>button[kind="primary"],'
+        f'{sb} .stButton>button[data-testid="stBaseButton-primary"]'
+        "{background:rgba(56,189,248,.16);border-color:rgba(56,189,248,.6);"
+        "color:#38bdf8;box-shadow:0 0 18px rgba(56,189,248,.3);}"
+        "</style>"
+    )
+
+
+def loader_html(message="Loading"):
+    """The loading screen: a grid of squares whose colours keep changing (one line, no blank lines)."""
+    cols, rows = 16, 7
+    squares = "".join(
+        f'<div class="ld-sq" style="animation-delay:{c * 0.09 + r * 0.06:.2f}s"></div>'
+        for r in range(rows)
+        for c in range(cols)
+    )
+    return (
+        LOADER_CSS
+        + '<div class="ld-overlay"><div class="ld-grid">' + squares + "</div>"
+        + f'<div class="ld-text">{message}...</div></div>'
+    )
+
+
+@contextmanager
+def loading(message="Loading"):
+    """Show the loading screen while the code inside the `with` block runs."""
+    import streamlit as st
+
+    slot = st.empty()
+    slot.markdown(loader_html(message), unsafe_allow_html=True)
+    try:
+        yield
+    finally:
+        slot.empty()
 
 
 def gauge_svg(value, caption, color, scale_max=500, size=220):
