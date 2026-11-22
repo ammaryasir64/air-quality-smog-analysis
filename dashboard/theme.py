@@ -3,8 +3,9 @@ dashboard/theme.py
 
 Aeris-inspired visual theme for the Streamlit dashboard (CSS only), plus:
   - nav_css(): an icon-rail sidebar that widens when the menu button is pressed
-  - loading() / loader_html(): a loading screen made of changing squares, in the
-    dashboard colours (navy, cyan, purple, green)
+  - loading() / loader_html(): a loading screen made of a small cluster of squares
+    that keep changing, in the dashboard colours (navy, cyan, purple, green)
+  - a LIVE badge style, and removal of the empty band at the top of the page
 
 This file contains NO data. All numbers shown come from the Supabase tables.
 """
@@ -42,7 +43,16 @@ html, body, .stApp, [class*="css"] {font-family: 'Plus Jakarta Sans', sans-serif
 }
 @keyframes floaty {from {transform: translateY(0);} to {transform: translateY(-28px);}}
 
-.block-container {position: relative; z-index: 1; padding-top: 1.5rem; max-width: 1250px;}
+.block-container {position: relative; z-index: 1; max-width: 1250px;}
+
+/* remove the empty band at the top (Streamlit header and toolbar) */
+header[data-testid="stHeader"] {
+  background: transparent !important; height: 0 !important; min-height: 0 !important;
+}
+[data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] {
+  display: none !important;
+}
+[data-testid="stMainBlockContainer"], .block-container {padding-top: .8rem !important;}
 
 /* headings */
 h1 {font-weight: 800 !important;
@@ -118,32 +128,50 @@ section[data-testid="stSidebar"] {
        font-weight: 600; border: 1px solid; margin-right: 6px;}
 .note {color: #94a3b8; font-size: .8rem;}
 
-/* header brand */
-.brand {color: #e2e8f0; font-weight: 800; font-size: 1.1rem; line-height: 1.3; padding-top: 4px;}
-.brand span {display: block; color: #64748b; font-size: .75rem; font-weight: 500;}
+/* header brand + LIVE badge (dark blue "crystal" pill) */
+.brand {color: #e2e8f0; font-weight: 800; font-size: 1.1rem; line-height: 1.3; padding-top: 2px;}
+.live-row {display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 6px;}
+.live-pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 999px;
+  background: linear-gradient(145deg, rgba(20,48,112,.9), rgba(8,18,48,.9));
+  border: 1px solid rgba(96,165,250,.55);
+  box-shadow: 0 0 18px rgba(37,99,235,.35), inset 0 1px 0 rgba(255,255,255,.18),
+              inset 0 -6px 12px rgba(2,8,24,.5);
+  backdrop-filter: blur(10px); color: #dbeafe; font-weight: 800; font-size: .76rem;
+  letter-spacing: .16em; cursor: help;
+}
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #38bdf8;
+  box-shadow: 0 0 8px #38bdf8; animation: live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes live-pulse {0%, 100% {opacity: 1; transform: scale(1);} 50% {opacity: .4; transform: scale(.7);}}
+.live-time {color: #94a3b8; font-size: .78rem; font-weight: 500;}
 </style>
 """
 
+# Loading screen: a small cluster of 3x3 squares, turned 45 degrees (diamonds). Each square
+# fades in, changes colour (cyan -> purple -> green) and vanishes at its own moment,
+# so the shape keeps rearranging.
 LOADER_CSS = (
     "<style>"
-    ".ld-overlay{position:fixed;inset:0;z-index:1000000;display:flex;flex-direction:column;"
-    "align-items:center;justify-content:center;gap:26px;"
+    ".ld-overlay{position:fixed;inset:0;z-index:1000000;display:flex;align-items:center;"
+    "justify-content:center;"
     "background:radial-gradient(900px 500px at 10% -10%,rgba(56,189,248,.16),transparent 60%),"
     "radial-gradient(800px 500px at 100% 0%,rgba(139,92,246,.14),transparent 55%),#050b16;}"
-    ".ld-grid{display:grid;grid-template-columns:repeat(16,18px);gap:6px;max-width:92vw;}"
-    ".ld-sq{width:18px;height:18px;border-radius:4px;background:#12203a;"
-    "animation:ld-pulse 2.6s ease-in-out infinite;}"
-    "@keyframes ld-pulse{0%,100%{background:#12203a;transform:scale(.82);box-shadow:none}"
-    "25%{background:#38bdf8;transform:scale(1);box-shadow:0 0 10px rgba(56,189,248,.6)}"
-    "50%{background:#a78bfa;transform:scale(.95);box-shadow:0 0 10px rgba(167,139,250,.5)}"
-    "75%{background:#22c55e;transform:scale(1);box-shadow:0 0 10px rgba(34,197,94,.5)}}"
-    ".ld-text{color:#94a3b8;font-family:'Plus Jakarta Sans',sans-serif;font-size:.95rem;"
-    "letter-spacing:.06em;animation:ld-fade 1.6s ease-in-out infinite;}"
-    "@keyframes ld-fade{0%,100%{opacity:.55}50%{opacity:1}}"
-    "@media (max-width:480px){.ld-grid{grid-template-columns:repeat(16,13px);gap:4px}"
-    ".ld-sq{width:13px;height:13px}}"
+    ".ld-cluster{display:grid;grid-template-columns:repeat(3,15px);gap:5px;transform:rotate(45deg);}"
+    ".ld-sq{width:15px;height:15px;border-radius:3px;background:#38bdf8;opacity:0;"
+    "animation:ld-shuffle 2.4s ease-in-out infinite;}"
+    "@keyframes ld-shuffle{"
+    "0%{opacity:0;transform:scale(.2);background:#38bdf8}"
+    "18%{opacity:1;transform:scale(1);background:#38bdf8;box-shadow:0 0 10px rgba(56,189,248,.7)}"
+    "50%{opacity:1;transform:scale(1);background:#a78bfa;box-shadow:0 0 10px rgba(167,139,250,.6)}"
+    "78%{opacity:1;transform:scale(1);background:#22c55e;box-shadow:0 0 10px rgba(34,197,94,.6)}"
+    "100%{opacity:0;transform:scale(.2);background:#22c55e}}"
     "</style>"
 )
+
+# Start each square at a different point of its cycle so the shape changes from the first frame.
+LOADER_DELAYS = [-2.2, -0.4, -1.5, -0.9, -1.9, -0.1, -1.2, -2.0, -0.7]
 
 
 def inject_theme():
@@ -180,18 +208,14 @@ def nav_css(is_open):
 
 
 def loader_html(message="Loading"):
-    """The loading screen: a grid of squares whose colours keep changing (one line, no blank lines)."""
-    cols, rows = 16, 7
+    """
+    The loading screen: a small cluster of squares that keep changing (one line, no blank
+    lines). `message` is kept so older code still works; it is not shown.
+    """
     squares = "".join(
-        f'<div class="ld-sq" style="animation-delay:{c * 0.09 + r * 0.06:.2f}s"></div>'
-        for r in range(rows)
-        for c in range(cols)
+        f'<div class="ld-sq" style="animation-delay:{delay}s"></div>' for delay in LOADER_DELAYS
     )
-    return (
-        LOADER_CSS
-        + '<div class="ld-overlay"><div class="ld-grid">' + squares + "</div>"
-        + f'<div class="ld-text">{message}...</div></div>'
-    )
+    return LOADER_CSS + '<div class="ld-overlay"><div class="ld-cluster">' + squares + "</div></div>"
 
 
 @contextmanager
