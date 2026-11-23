@@ -17,6 +17,7 @@ No number on this dashboard is invented.
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -37,7 +38,16 @@ st.set_page_config(page_title="Pakistan Air Quality", page_icon="🌫️", layou
                    initial_sidebar_state="expanded")
 theme.inject_theme()
 
-CACHE_SECONDS = 300
+CACHE_SECONDS = 900
+
+# ------------------------------------------------------------ loading screen before the sidebar
+# The squares are drawn first (before the sidebar and header exist) and hide the sidebar while they
+# are on screen. They are removed as soon as the data is ready.
+_needs_load = time.time() - st.session_state.get("loaded_at", 0) > CACHE_SECONDS - 10
+loader_slot = st.empty()
+if _needs_load:
+    loader_slot.markdown(theme.loader_html(), unsafe_allow_html=True)
+
 LOCAL_TZ = "Asia/Karachi"
 CURRENT_TABLE = "openweather_current_air_quality"
 HOURLY_TABLE = "openweather_air_quality"
@@ -45,8 +55,8 @@ HOURLY_ROWS_PER_CITY = 700
 MIN_HOURS_PER_DAY = 18  # a day needs at least 18 hours of calculated AQI (75%) to be plotted
 
 PAGES = ["Home", "Air Quality Analytics", "Live Monitoring", "Smog Analysis",
-         "Historical Data", "Model Forecast", "Health Advisory", "Alerts"]
-ICONS = ["home", "bar_chart", "sensors", "cloud", "history", "query_stats", "favorite", "notifications"]
+         "Historical Data", "Health Advisory"]
+ICONS = ["home", "bar_chart", "sensors", "cloud", "history", "favorite"]
 POLLUTANTS = [("pm2_5", "PM2.5"), ("pm10", "PM10"), ("carbon_monoxide", "Carbon Monoxide (CO)"),
               ("sulphur_dioxide", "Sulphur Dioxide (SO₂)"), ("nitrogen_dioxide", "Nitrogen Dioxide (NO₂)"),
               ("ozone", "Ozone (O₃)")]
@@ -71,6 +81,7 @@ ADVICE = {
     "Very Unhealthy": "Health alert. Avoid outdoor activity; sensitive groups should stay indoors.",
     "Hazardous": "Emergency conditions. Everyone should avoid outdoor exertion.",
 }
+HEAT_SCALE = [[0, "#22c55e"], [.17, "#eab308"], [.33, "#f97316"], [.5, "#ef4444"], [1, "#a855f7"]]
 
 
 def get_setting(name):
@@ -107,45 +118,52 @@ def load_current():
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Loading hourly data...")
-def load_hourly(city):
-    rows = (get_client().table(HOURLY_TABLE).select("time,ow_aqi,us_aqi_calc,pm2_5,pm10")
-            .eq("city", city).order("time", desc=True).limit(HOURLY_ROWS_PER_CITY).execute().data)
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    df["time"] = pd.to_datetime(df["time"])
-    return df.sort_values("time").reset_index(drop=True)
+HOURLY_COLUMNS = "city,time,ow_aqi,us_aqi_calc,pm2_5,pm10"
+PAGE_SIZE = 1000
+HISTORY_DAYS = 45  # only the last 45 days of stored hours (plus the forecast) are fetched
 
 
-@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Loading stored hourly records...")
-def load_all_hourly():
-    rows, start = [], 0
-    while True:
-        batch = (get_client().table(HOURLY_TABLE).select("city,time,us_aqi_calc")
-                 .order("city").order("time").range(start, start + 999).execute().data)
-        rows.extend(batch)
-        if len(batch) < 1000:
-            break
-        start += 1000
-    df = pd.DataFrame(rows)
+def _fetch_page(client, since, start):
+    return (client.table(HOURLY_TABLE).select(HOURLY_COLUMNS).gte("time", since)
+            .order("city").order("time").range(start, start + PAGE_SIZE - 1).execute().data)
+
+
+@st.cache_data(ttl=CACHE_SECONDS, show_spinner=False)
+def load_hourly_all():
+    """All cities' hourly rows in ONE cached call (pages are fetched in parallel).
+    Every page and city switch then works on this in-memory table, with no new database call."""
+    client = get_client()
+    since = (pd.Timestamp.now(tz=LOCAL_TZ).tz_localize(None) - pd.Timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+    total = client.table(HOURLY_TABLE).select("city", count="exact").gte("time", since).limit(1).execute().count
+    rows = []
+    if total:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for page in pool.map(lambda start: _fetch_page(client, since, start), range(0, total, PAGE_SIZE)):
+                rows.extend(page)
+    elif total is None:  # count not supported: fall back to one page after another
+        start = 0
+        while True:
+            page = _fetch_page(client, since, start)
+            rows.extend(page)
+            if len(page) < PAGE_SIZE:
+                break
+            start += PAGE_SIZE
+    df = pd.DataFrame(rows, columns=HOURLY_COLUMNS.split(","))
     if not df.empty:
         df["time"] = pd.to_datetime(df["time"])
+        df = df.sort_values(["city", "time"]).reset_index(drop=True)
     return df
 
 
-def load_current_with_loader():
-    """Show the squares loading screen on the first visit, after Refresh, or when the cache is old."""
-    forced = st.session_state.pop("force_loader", False)
-    first = "loaded_at" not in st.session_state
-    stale = time.time() - st.session_state.get("loaded_at", 0) > CACHE_SECONDS
-    if forced or first or stale:
-        with theme.loading("Loading Pakistan air-quality data"):
-            data = load_current()
-    else:
-        data = load_current()
-    st.session_state["loaded_at"] = time.time()
-    return data
+def load_hourly(city):
+    allh = load_hourly_all()
+    if allh.empty:
+        return allh
+    return allh[allh["city"] == city].reset_index(drop=True)
+
+
+def load_all_hourly():
+    return load_hourly_all()
 
 
 def category(v):
@@ -175,7 +193,7 @@ def ow_text(v):
 def style(fig, h=420):
     fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                       height=h, margin=dict(l=10, r=10, t=50, b=10),
-                      font=dict(family="Plus Jakarta Sans, sans-serif"))
+                      font=dict(family="Plus Jakarta Sans, Segoe UI, sans-serif"))
     return fig
 
 
@@ -212,6 +230,31 @@ def bar_cities(df, col, title, highlight, h=None, fmt_str="%{x:.0f}"):
     return style(fig, h)
 
 
+def week_heatmap(hourly, city):
+    """Selected city, last 7 days (today included): one square per hour. None if nothing to show."""
+    now = pd.Timestamp.now(tz=LOCAL_TZ).tz_localize(None)
+    start = now.normalize() - pd.Timedelta(days=6)
+    w = hourly[(hourly["time"] >= start) & (hourly["time"] <= now)].dropna(subset=["us_aqi_calc"]).copy()
+    if w.empty:
+        return None
+    w["day"] = w["time"].dt.normalize()
+    w["hour"] = w["time"].dt.hour
+    days = pd.date_range(start, periods=7)
+    grid = (w.pivot_table(index="day", columns="hour", values="us_aqi_calc", aggfunc="mean")
+            .reindex(index=days, columns=range(24)))
+    hours = [f"{h:02d}:00" for h in range(24)]
+    day_labels = [d.strftime("%a %d %b") for d in days]
+    fig = go.Figure(go.Heatmap(
+        z=grid.values.round(0), x=hours, y=day_labels,
+        colorscale=HEAT_SCALE, zmin=0, zmax=300, xgap=3, ygap=3, hoverongaps=False,
+        colorbar=dict(title="US AQI"),
+        hovertemplate="%{y}, %{x}<br>US AQI %{z}<extra></extra>"))
+    fig.update_yaxes(autorange="reversed", categoryorder="array", categoryarray=day_labels)
+    fig.update_xaxes(tickmode="array", tickvals=hours[::3])
+    fig.update_layout(title=f"This week, hour by hour: US AQI (calculated) for {city} (Asia/Karachi time)")
+    return style(fig, 380)
+
+
 # ------------------------------------------------------------ navigation state
 st.session_state.setdefault("page", PAGES[0])
 st.session_state.setdefault("nav_open", False)
@@ -223,47 +266,60 @@ def toggle_nav():
 
 def go_to(name):
     st.session_state.page = name
+    st.session_state["scroll_top"] = True  # new page starts at the top
 
 
-def refresh_data():
-    st.cache_data.clear()
-    st.session_state["force_loader"] = True
+def nav_button(label, **kwargs):
+    """Full-width button, so every sidebar box has the same size (works on old and new Streamlit)."""
+    try:
+        return st.button(label, width="stretch", **kwargs)
+    except TypeError:
+        return st.button(label, use_container_width=True, **kwargs)
 
 
-st.markdown(theme.nav_css(st.session_state.nav_open), unsafe_allow_html=True)
-
-# ------------------------------------------------------------ sidebar: icon rail + menu button
-open_ = st.session_state.nav_open
-with st.sidebar:
-    st.button("Close menu" if open_ else " ",
-              icon=":material/menu_open:" if open_ else ":material/menu:",
-              key="nav_toggle", on_click=toggle_nav, help="Show or hide the menu")
-    for name, icon in zip(PAGES, ICONS):
-        st.button(name if open_ else " ", icon=f":material/{icon}:", key=f"nav_{name}",
-                  on_click=go_to, args=(name,), help=name,
-                  type="primary" if st.session_state.page == name else "secondary")
-page = st.session_state.page
-
-# ------------------------------------------------------------ data
+# ------------------------------------------------------------ data (loader is still covering the screen)
 try:
-    current = load_current_with_loader()
+    current = load_current()
+    if not current.empty:
+        load_hourly_all()  # everything is fetched now, behind the squares; later clicks are instant
 except Exception as exc:
+    loader_slot.empty()
     st.error(f"Could not load data from Supabase: {exc}")
     st.stop()
+st.session_state["loaded_at"] = time.time()
+loader_slot.empty()  # data is ready: remove the squares
+
 if current.empty:
     st.warning("No data in the OpenWeather tables yet. Run the ETL pipeline first.")
     st.stop()
 
-# ------------------------------------------------------------ header: brand, city selector, refresh
+# ------------------------------------------------------------ sidebar: icon rail + menu button
+st.markdown(theme.nav_css(st.session_state.nav_open), unsafe_allow_html=True)
+open_ = st.session_state.nav_open
+with st.sidebar:
+    nav_button(("Close menu" if open_ else " "),
+               icon=":material/menu_open:" if open_ else ":material/menu:",
+               key="nav_toggle", on_click=toggle_nav, help="Show or hide the menu")
+    for name, icon in zip(PAGES, ICONS):
+        nav_button((name if open_ else " "), icon=f":material/{icon}:", key=f"nav_{name}",
+                   on_click=go_to, args=(name,), help=name,
+                   type="primary" if st.session_state.page == name else "secondary")
+page = st.session_state.page if st.session_state.page in PAGES else PAGES[0]
+
+# ------------------------------------------------------------ header: brand + LIVE badge, city selector
 cities_sorted = sorted(config.CITIES)
-head_a, head_b, head_c = st.columns([3, 2, 1])
+head_a, head_b = st.columns([3, 2])
+live_title = ("Latest stored model data. The ETL pipeline refreshes it about every 12 hours; "
+              "it is not a minute-by-minute feed.")
 head_a.markdown(
-    f'<div class="brand">🌫️ Pakistan Air Quality'
-    f'<span>Latest stored record: {fmt_time(current["fetched_at"].max())} (PKT)</span></div>',
+    '<div class="brand">🌫️ Pakistan Air Quality'
+    '<div class="live-row">'
+    f'<span class="live-pill" title="{live_title}"><i class="live-dot"></i>LIVE</span>'
+    '</div></div>',
     unsafe_allow_html=True)
-city = head_b.selectbox("City", cities_sorted, index=cities_sorted.index("Lahore"),
+city = head_b.selectbox("City", cities_sorted,
+                        index=cities_sorted.index("Lahore") if "Lahore" in cities_sorted else 0,
                         key="city", label_visibility="collapsed")
-head_c.button("Refresh", icon=":material/refresh:", on_click=refresh_data)
 
 match = current[current["city"] == city]
 if match.empty:
@@ -285,10 +341,10 @@ def pollutant_cards(cols_per_row=3):
 
 
 # ------------------------------------------------------------ pages
-if page == PAGES[0]:
+if page == "Home":
     st.title("Air Quality and Smog Analysis")
     st.caption("Monitoring Pakistan's Air Quality • Understanding Smog • Model Forecasts")
-    c1, c2, c3 = st.columns([2, 1, 1])
+    c1, right = st.columns([2, 2])
     hero = ('<div class="glass hero-glass">'
             f'<div>{theme.gauge_svg(aqi_value, "US AQI (calculated)", color)}</div>'
             '<div class="hero-text">'
@@ -297,10 +353,22 @@ if page == PAGES[0]:
             f'<div class="hero-sub">OpenWeather index: {ow_text(row["ow_aqi"])}<br>'
             f'Model time: {fmt_time(row["time"])} (PKT)</div></div></div>')
     c1.markdown(hero, unsafe_allow_html=True)
-    c2.markdown(theme.glass_card("PM2.5", fmt(row["pm2_5"]), "µg/m³", "Fine particles (model estimate)", "#38bdf8"),
-                unsafe_allow_html=True)
-    c3.markdown(theme.glass_card("PM10", fmt(row["pm10"]), "µg/m³", "Coarse particles (model estimate)", "#a78bfa"),
-                unsafe_allow_html=True)
+    top_row = right.columns(2)
+    bottom_row = right.columns(2)
+    top_row[0].markdown(theme.glass_card("PM2.5", fmt(row["pm2_5"]), "µg/m³",
+                                         "Fine particles (model estimate)", "#38bdf8"),
+                        unsafe_allow_html=True)
+    top_row[1].markdown(theme.glass_card("PM10", fmt(row["pm10"]), "µg/m³",
+                                         "Coarse particles (model estimate)", "#a78bfa"),
+                        unsafe_allow_html=True)
+    bottom_row[0].markdown(theme.glass_card("Nitrogen Dioxide (NO₂)", fmt(row["nitrogen_dioxide"]), "µg/m³",
+                                            "Mostly from vehicles and burning fuel (model estimate)",
+                                            "#22c55e"),
+                           unsafe_allow_html=True)
+    bottom_row[1].markdown(theme.glass_card("Ozone (O₃)", fmt(row["ozone"]), "µg/m³",
+                                            "Forms when sunlight reacts with other pollutants (model estimate)",
+                                            "#f59e0b"),
+                           unsafe_allow_html=True)
     left, right = st.columns(2)
     hourly = load_hourly(city)
     with left:
@@ -317,12 +385,19 @@ if page == PAGES[0]:
     worst = current.dropna(subset=["us_aqi_calc"]).nlargest(3, "us_aqi_calc")
     txt = "<br>".join(f"{r.city}: US AQI {r.us_aqi_calc:.0f} ({category(r.us_aqi_calc)})"
                       for r in worst.itertuples())
-    b.markdown(theme.glass_card("Recent pollution alerts (3 highest)", f"{len(worst)} cities", "", txt, "#ef4444"),
+    b.markdown(theme.glass_card("Highest US AQI right now (top 3)", f"{len(worst)} cities", "", txt, "#ef4444"),
                unsafe_allow_html=True)
+    heat = week_heatmap(hourly, city) if not hourly.empty else None
+    if heat is None:
+        st.info("Data Not Available: no stored hourly data for this city in the last 7 days.")
+    else:
+        st.plotly_chart(heat)
+        st.caption("Each square is one hour of the last 7 days for the selected city (calculated US AQI, "
+                   "model data). Dark squares mean no data for that hour.")
     st.caption("The US AQI here is calculated from OpenWeather's model concentrations (see Methodology below). "
                "CO2, temperature and humidity are not collected by this project.")
 
-elif page == PAGES[1]:
+elif page == "Air Quality Analytics":
     st.title("Air Quality Analytics")
     pollutant_cards()
     hourly = load_hourly(city)
@@ -339,7 +414,7 @@ elif page == PAGES[1]:
     fig.update_yaxes(dtick=1, categoryorder="array", categoryarray=pm["city"].tolist())
     st.plotly_chart(style(fig, max(560, 30 * len(pm))))
 
-elif page == PAGES[2]:
+elif page == "Live Monitoring":
     st.title("Live Monitoring")
     st.caption("Latest stored model estimate per city. Data updates when the ETL runs (every 12 hours).")
     m = current.dropna(subset=["us_aqi_calc", "latitude", "longitude"]).copy()
@@ -376,7 +451,7 @@ elif page == PAGES[2]:
         unsafe_allow_html=True,
     )
 
-elif page == PAGES[3]:
+elif page == "Smog Analysis":
     st.title("Smog Analysis")
     st.caption("Cities grouped by US AQI category (standard AQI ranges applied to our calculated AQI).")
     counts = (current["us_aqi_calc"].apply(category).value_counts().reindex(ORDER, fill_value=0).reset_index())
@@ -388,7 +463,7 @@ elif page == PAGES[3]:
                                  ADVICE.get(cat, ""), color), unsafe_allow_html=True)
     st.plotly_chart(bar_cities(current, "pm2_5", "PM2.5 by city (µg/m³)", city, fmt_str="%{x:.1f}"))
 
-elif page == PAGES[4]:
+elif page == "Historical Data":
     st.title("Historical Data")
     allh = load_all_hourly()
     now = pd.Timestamp.now(tz=LOCAL_TZ).tz_localize(None)
@@ -407,23 +482,26 @@ elif page == PAGES[4]:
                       .groupby(["day", "city"])["us_aqi_calc"].agg(["mean", "count"]).reset_index())
             complete = counts[counts["count"] >= MIN_HOURS_PER_DAY].copy()
             complete["us_aqi_calc"] = complete["mean"].round(1)
-            all_days = pd.date_range(past["time"].dt.date.min(), past["time"].dt.date.max()).date
-            grid = pd.MultiIndex.from_product([all_days, picks], names=["day", "city"])
-            daily = complete.set_index(["day", "city"])[["us_aqi_calc"]].reindex(grid).reset_index()
-            fig = px.line(daily, x="day", y="us_aqi_calc", color="city", markers=True,
-                          title="Daily average US AQI (calculated)",
-                          labels={"us_aqi_calc": "US AQI (calculated)"})
-            st.plotly_chart(style(fig))
+            complete = complete.sort_values(["city", "day"])
+            if complete.empty:
+                st.info("Data Not Available: no complete day for the selected cities.")
+            else:
+                # one solid line per city; it goes straight from one available day to the next
+                fig = px.line(complete, x="day", y="us_aqi_calc", color="city", markers=True,
+                              title="Daily average US AQI (calculated)",
+                              labels={"us_aqi_calc": "US AQI (calculated)"})
+                fig.update_traces(line=dict(width=3), connectgaps=True)
+                st.plotly_chart(style(fig))
             left_out = sorted(counts.loc[counts["count"] < MIN_HOURS_PER_DAY, "day"].unique())
             note = (f"Only days with at least {MIN_HOURS_PER_DAY} hours of calculated AQI are plotted; "
-                    "a break in the line means missing or incomplete data.")
+                    "the line joins the days that have data.")
             if left_out:
                 note += " Days left out for the selected cities: " + ", ".join(
                     d.strftime("%d %b") for d in left_out) + "."
             st.caption(note)
 
-elif page == PAGES[5]:
-    st.title("Model Forecast")
+    st.divider()
+    st.subheader("Model Forecast")
     st.caption("These are forecast hours supplied by OpenWeather (4 days). This project has no "
                "prediction model of its own.")
     hourly = load_hourly(city)
@@ -439,7 +517,7 @@ elif page == PAGES[5]:
                                      COLORS[category(peak['us_aqi_calc'])]), unsafe_allow_html=True)
         st.plotly_chart(hourly_fig(hourly, city, past=False, future=True))
 
-elif page == PAGES[6]:
+else:  # Health Advisory
     st.title("Health Advisory")
     st.caption("General guidance by US AQI category (US EPA scheme). It is not medical advice.")
     st.markdown(theme.glass_card(f"{city} right now", cat, f"US AQI {fmt(row['us_aqi_calc'], 0)}",
@@ -448,54 +526,56 @@ elif page == PAGES[6]:
         st.markdown(theme.glass_card(name, RANGES[name], "US AQI range", ADVICE[name], COLORS[name]),
                     unsafe_allow_html=True)
 
-else:
-    st.title("Alerts")
-    limit = st.select_slider("Alert when US AQI (calculated) is at least", options=[101, 151, 201, 301], value=151)
-    hits = current.dropna(subset=["us_aqi_calc"]).query("us_aqi_calc >= @limit").sort_values(
-        "us_aqi_calc", ascending=False)
-    if hits.empty:
-        st.success("No city is at or above this level in the latest stored data.")
-    else:
-        st.caption(f"{len(hits)} of {len(current)} cities at or above US AQI {limit}.")
-        for r in hits.itertuples():
-            st.markdown(theme.glass_card(f"{r.city}, {r.province}", f"{r.us_aqi_calc:.0f}",
-                                         category(r.us_aqi_calc),
-                                         f"PM2.5 {fmt(r.pm2_5)} µg/m³ · PM10 {fmt(r.pm10)} µg/m³",
-                                         COLORS[category(r.us_aqi_calc)]), unsafe_allow_html=True)
+# ------------------------------------------------------------ footer (Home page only)
+if page == "Home":
+    st.divider()
+    st.info("**Data source:** OpenWeather Air Pollution API (SILAM atmospheric model). Values are model-based "
+            "estimates, not direct ground-station measurements, and not guaranteed minute-by-minute live readings.")
 
-# ------------------------------------------------------------ footer
-st.divider()
-st.markdown(f'<p class="note"><b>Last Updated:</b> {fmt_time(row["fetched_at"])} (PKT) = when our ETL fetched '
-            f'the data. The page caches data for up to {CACHE_SECONDS // 60} min; Refresh reloads from the '
-            'database and does not call the OpenWeather API.</p>', unsafe_allow_html=True)
-st.info("**Data source:** OpenWeather Air Pollution API (SILAM atmospheric model). Values are model-based "
-        "estimates, not direct ground-station measurements, and not guaranteed minute-by-minute live readings.")
+    with st.expander("How is the US AQI calculated here?"):
+        st.markdown(
+            "- OpenWeather supplies hourly pollutant concentrations (µg/m³, SILAM model) and its own 1-5 index.\n"
+            "- Our ETL calculates a US AQI (0-500) from the six pollutants with the US EPA breakpoint table "
+            "(40 CFR Part 58, Appendix G, as amended in 2024).\n"
+            "- Averaging: PM2.5 and PM10 use a 24-hour rolling mean, O₃ and CO an 8-hour mean, NO₂ and SO₂ the "
+            "1-hour value.\n"
+            "- Gas concentrations are converted from µg/m³ to ppb/ppm assuming 25 °C and 1 atm (an assumption).\n"
+            "- The overall AQI is the highest pollutant index and is capped at 500.\n"
+            "- Because PM is averaged over 24 hours, the AQI reacts slowly to sudden spikes, while the PM2.5 "
+            "card shows the latest hourly value.\n"
+            "- This is an approximation from model data, not an official AQI."
+        )
 
-with st.expander("How is the US AQI calculated here?"):
-    st.markdown(
-        "- OpenWeather supplies hourly pollutant concentrations (µg/m³, SILAM model) and its own 1-5 index.\n"
-        "- Our ETL calculates a US AQI (0-500) from the six pollutants with the US EPA breakpoint table "
-        "(40 CFR Part 58, Appendix G, as amended in 2024).\n"
-        "- Averaging: PM2.5 and PM10 use a 24-hour rolling mean, O₃ and CO an 8-hour mean, NO₂ and SO₂ the "
-        "1-hour value.\n"
-        "- Gas concentrations are converted from µg/m³ to ppb/ppm assuming 25 °C and 1 atm (an assumption).\n"
-        "- The overall AQI is the highest pollutant index and is capped at 500.\n"
-        "- Because PM is averaged over 24 hours, the AQI reacts slowly to sudden spikes, while the PM2.5 "
-        "card shows the latest hourly value.\n"
-        "- This is an approximation from model data, not an official AQI."
-    )
+    with st.expander("Why can these values differ from official ground-station AQI?"):
+        st.markdown(
+            "- **Model vs. sensors:** this dashboard shows model-based estimates (OpenWeather / SILAM), "
+            "one value per city for the city-centre coordinates. Official dashboards use ground "
+            "stations placed at specific spots.\n"
+            "- **Resolution:** the model grid covers many kilometres, so local hotspots (busy roads, "
+            "industrial areas) can look lower than a station reading. Nearby cities may show similar values.\n"
+            "- **Labels:** some local dashboards use different category names or breakpoints, so the "
+            "same number can carry a different label. This dashboard uses the US EPA scale "
+            "(Hazardous starts at 301).\n"
+            "- **Timing:** data is fetched by the ETL pipeline (every 12 hours) from model output, "
+            "not minute-by-minute sensor feeds.\n"
+            "- For official health decisions, check your local environmental agency's station data."
+        )
 
-with st.expander("Why can these values differ from official ground-station AQI?"):
-    st.markdown(
-        "- **Model vs. sensors:** this dashboard shows model-based estimates (OpenWeather / SILAM), "
-        "one value per city for the city-centre coordinates. Official dashboards use ground "
-        "stations placed at specific spots.\n"
-        "- **Resolution:** the model grid covers many kilometres, so local hotspots (busy roads, "
-        "industrial areas) can look lower than a station reading. Nearby cities may show similar values.\n"
-        "- **Labels:** some local dashboards use different category names or breakpoints, so the "
-        "same number can carry a different label. This dashboard uses the US EPA scale "
-        "(Hazardous starts at 301).\n"
-        "- **Timing:** data is fetched by the ETL pipeline (every 12 hours) from model output, "
-        "not minute-by-minute sensor feeds.\n"
-        "- For official health decisions, check your local environmental agency's station data."
-    )
+
+# ------------------------------------------------------------ new page: start at the top
+# (Streamlit keeps the old scroll position when only the page changes)
+if st.session_state.pop("scroll_top", False):
+    try:
+        import streamlit.components.v1 as components
+
+        components.html(
+            "<script>(function(){var d=window.parent.document;"
+            "function up(){['[data-testid=stMain]','section.main','.main','.stMain'].forEach(function(q){"
+            "var e=d.querySelector(q);if(e&&e.scrollTo){e.scrollTo(0,0);}});"
+            "if(d.scrollingElement){d.scrollingElement.scrollTop=0;}}"
+            "up();setTimeout(up,60);setTimeout(up,300);})();"
+            f"//{time.time()}</script>",
+            height=0,
+        )
+    except Exception:
+        pass
