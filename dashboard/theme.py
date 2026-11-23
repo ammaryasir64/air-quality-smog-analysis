@@ -185,52 +185,87 @@ def inject_theme():
     st.markdown(CSS, unsafe_allow_html=True)
 
 
+def logo_svg(size=40):
+    """The site logo (own drawing, no emoji): a gradient tile with three wind / smog streaks."""
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" '
+        'style="flex:none;display:block">'
+        '<defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">'
+        '<stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#8b5cf6"/>'
+        '</linearGradient></defs>'
+        '<rect width="48" height="48" rx="13" fill="url(#lg)"/>'
+        '<g fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round">'
+        '<path d="M10 17h19a5 5 0 1 0-5-5"/>'
+        '<path d="M10 25h27a5 5 0 1 1-5 5"/>'
+        '<path d="M10 33h13a4 4 0 1 1-4 4"/></g></svg>'
+    )
+
+
+def sidebar_brand(is_open):
+    """Top of the sidebar: logo + name when open, only the logo when closed (centred)."""
+    if is_open:
+        return (
+            '<div class="sb-brand">' + logo_svg(42) +
+            '<div class="sb-name">Pakistan<br>Air Quality</div></div>'
+        )
+    return '<div class="sb-brand sb-brand-closed">' + logo_svg(42) + "</div>"
+
+
 def nav_css(is_open):
     """
-    CSS for the icon-rail sidebar.
-    Closed: every button is the same 56px square, centred in the rail (icon in the middle).
-    Open:   every button is full width and the same height, icon + name.
+    Icon-rail sidebar (reference: TraceGit). Simple block layout, no flex on Streamlit's wrappers,
+    so nothing can be drawn twice. Only the button itself is styled.
+    Closed: 54px buttons centred. Open: full-width buttons, icon + name from the left.
     """
-    width = 260 if is_open else 92
+    width = 270 if is_open else 92
     sb = 'section[data-testid="stSidebar"]'
-    btn = f"{sb} .stButton>button"
+    btn = f'{sb} [data-testid="stButton"] button'
     css = (
         "<style>"
         f"{sb}{{width:{width}px !important;min-width:{width}px !important;"
         f"max-width:{width}px !important;transition:width .25s ease;}}"
         f'{sb} [data-testid="stSidebarHeader"],{sb} [data-testid="stSidebarCollapseButton"]'
         "{display:none !important;}"
-        f'{sb} [data-testid="stSidebarUserContent"]{{padding:1rem .5rem !important;}}'
-        f'{sb} [data-testid="stVerticalBlock"]{{align-items:stretch !important;gap:.4rem !important;}}'
-        # each button sits in a row that spans the rail and centres (closed) or stretches (open) it
-        f'{sb} [data-testid="stElementContainer"],{sb} .stElementContainer'
-        f"{{width:100% !important;display:flex !important;"
-        f"justify-content:{'stretch' if is_open else 'center'} !important;}}"
-        f'{sb} [data-testid="stButton"],{sb} .stButton'
-        f"{{width:{'100%' if is_open else 'auto'} !important;min-width:0 !important;"
-        "display:flex !important;justify-content:center !important;}"
-        f"{btn}{{display:flex !important;align-items:center !important;"
-        "height:56px !important;min-height:56px !important;box-sizing:border-box;"
-        "white-space:nowrap;overflow:hidden;border-radius:14px;"
-        "border:1px solid transparent;background:transparent;color:#94a3b8;box-shadow:none;"
-        "font-size:1rem;font-weight:600;}"
-        f"{btn} [data-testid='stIconMaterial'],{btn} span[data-testid='stIconMaterial']"
-        "{font-size:1.6rem !important;width:1.6rem !important;height:1.6rem !important;"
-        "flex:none !important;margin:0 !important;}"
-        f"{btn}:hover{{background:rgba(56,189,248,.12);"
-        "border-color:rgba(56,189,248,.35);color:#e2e8f0;"
-        "box-shadow:0 0 16px rgba(56,189,248,.18);transform:none;}"
+        f'{sb} [data-testid="stSidebarUserContent"]{{padding:1rem .6rem !important;}}'
+        # wrappers: plain full-width blocks
+        f'{sb} [data-testid="stButton"],{sb} [data-testid="stTooltipHoverTarget"]'
+        "{display:block !important;width:100% !important;}"
+        # logo block
+        ".sb-brand{display:flex;align-items:center;gap:12px;padding:6px 6px 14px 6px;}"
+        ".sb-name{color:#f1f5f9;font-weight:800;font-size:1.05rem;line-height:1.2;}"
+        # every item: no box
+        f"{btn}{{display:flex !important;align-items:center !important;height:54px !important;"
+        "min-height:54px !important;box-sizing:border-box;white-space:nowrap;"
+        "border:none !important;background:transparent !important;box-shadow:none !important;"
+        "color:#cbd5e1;font-size:1rem;border-radius:14px;}"
+        f"{btn} [data-testid='stIconMaterial']"
+        "{font-size:1.55rem !important;flex:none !important;margin:0 !important;"
+        "font-weight:400 !important;font-synthesis:none !important;}"
+        f"{btn}:hover{{background:rgba(148,163,184,.12) !important;color:#f8fafc;transform:none;}}"
+        # active page: the only filled item
         f'{btn}[kind="primary"],{btn}[data-testid="stBaseButton-primary"]'
-        "{background:rgba(56,189,248,.16);border-color:rgba(56,189,248,.6);"
-        "color:#38bdf8;box-shadow:0 0 18px rgba(56,189,248,.3);}"
+        "{background:#4f46e5 !important;color:#ffffff !important;"
+        "box-shadow:0 6px 20px rgba(79,70,229,.45) !important;}"
     )
     if is_open:
-        css += (f"{btn}{{width:100% !important;min-width:100% !important;max-width:100% !important;"
-                "justify-content:flex-start !important;gap:14px !important;padding:0 1rem !important;}")
+        tg = f"{sb} .st-key-nav_toggle"
+        css += (
+            f"{btn}{{width:100% !important;justify-content:flex-start !important;"
+            "gap:16px !important;padding:0 1rem !important;}"
+            + tg + " button{width:44px !important;min-width:44px !important;"
+            "padding:0 !important;justify-content:center !important;gap:0 !important;"
+            "height:44px !important;min-height:44px !important;margin-left:auto !important;}"
+            + tg + ' [data-testid="stMarkdownContainer"]{display:none !important;}'
+            + sb + ' [data-testid="stHorizontalBlock"]{flex-wrap:nowrap !important;gap:.3rem !important;}'
+        )
     else:
-        css += (f"{btn}{{width:56px !important;min-width:56px !important;max-width:56px !important;"
-                "justify-content:center !important;gap:0 !important;padding:0 !important;margin:0 auto !important;}"
-                f'{btn} [data-testid="stMarkdownContainer"]{{display:none !important;}}')
+        css += (
+            f"{btn}{{width:54px !important;min-width:54px !important;max-width:54px !important;"
+            "justify-content:center !important;gap:0 !important;padding:0 !important;"
+            "margin-left:auto !important;margin-right:auto !important;}"
+            f'{btn}[kind="primary"],{btn}[data-testid="stBaseButton-primary"]{{border-radius:50% !important;}}'
+            f'{btn} [data-testid="stMarkdownContainer"]{{display:none !important;}}'
+        )
     css += "</style>"
     return css
 
