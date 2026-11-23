@@ -2,9 +2,9 @@
 dashboard/theme.py
 
 Aeris-inspired visual theme for the Streamlit dashboard (CSS only), plus:
-  - nav_css(): an icon-rail sidebar that widens when the menu button is pressed
-  - loading() / loader_html(): a loading screen made of a small cluster of squares
-    that keep changing, in the dashboard colours (navy, cyan, purple, green)
+  - nav_css(): an icon-rail sidebar (equal-size buttons) that widens when the menu button is pressed
+  - loader_html(): a loading screen made of a small cluster of changing squares, shown ABOVE
+    everything (sidebar included) in the dashboard colours (navy, cyan, purple, green)
   - a LIVE badge style, and removal of the empty band at the top of the page
 
 This file contains NO data. All numbers shown come from the Supabase tables.
@@ -13,11 +13,12 @@ This file contains NO data. All numbers shown come from the Supabase tables.
 import math
 from contextlib import contextmanager
 
+# No web-font download here on purpose: an @import of Google Fonts blocks the first paint.
 CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
-
-html, body, .stApp, [class*="css"] {font-family: 'Plus Jakarta Sans', sans-serif;}
+html, body, .stApp, [class*="css"] {
+  font-family: 'Plus Jakarta Sans', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+}
 
 .stApp {
   background:
@@ -43,7 +44,8 @@ html, body, .stApp, [class*="css"] {font-family: 'Plus Jakarta Sans', sans-serif
 }
 @keyframes floaty {from {transform: translateY(0);} to {transform: translateY(-28px);}}
 
-.block-container {position: relative; z-index: 1; max-width: 1250px;}
+/* no z-index here: a z-index would trap the loader screen inside this box */
+.block-container {position: relative; max-width: 1250px;}
 
 /* remove the empty band at the top (Streamlit header and toolbar) */
 header[data-testid="stHeader"] {
@@ -93,7 +95,6 @@ section[data-testid="stSidebar"] {
 .glass {
   position: relative; overflow: hidden;
   background: linear-gradient(145deg, rgba(17,26,46,.78), rgba(10,18,36,.60));
-  backdrop-filter: blur(14px);
   border: 1px solid rgba(56,189,248,.18); border-radius: 18px;
   padding: 16px 18px; margin-bottom: 14px;
   box-shadow: 0 8px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04);
@@ -137,7 +138,7 @@ section[data-testid="stSidebar"] {
   border: 1px solid rgba(96,165,250,.55);
   box-shadow: 0 0 18px rgba(37,99,235,.35), inset 0 1px 0 rgba(255,255,255,.18),
               inset 0 -6px 12px rgba(2,8,24,.5);
-  backdrop-filter: blur(10px); color: #dbeafe; font-weight: 800; font-size: .76rem;
+  color: #dbeafe; font-weight: 800; font-size: .76rem;
   letter-spacing: .16em; cursor: help;
 }
 .live-dot {
@@ -151,11 +152,14 @@ section[data-testid="stSidebar"] {
 
 # Loading screen: a small cluster of 3x3 squares, turned 45 degrees (diamonds). Each square
 # fades in, changes colour (cyan -> purple -> green) and vanishes at its own moment,
-# so the shape keeps rearranging.
+# so the shape keeps rearranging. z-index is above Streamlit's sidebar and header.
 LOADER_CSS = (
     "<style>"
-    ".ld-overlay{position:fixed;inset:0;z-index:1000000;display:flex;align-items:center;"
-    "justify-content:center;"
+    # while the loader is on screen the sidebar and header are hidden, so nothing shows through
+    'section[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],'
+    'header[data-testid="stHeader"]{visibility:hidden !important;}'
+    ".ld-overlay{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;"
+    "display:flex;align-items:center;justify-content:center;"
     "background:radial-gradient(900px 500px at 10% -10%,rgba(56,189,248,.16),transparent 60%),"
     "radial-gradient(800px 500px at 100% 0%,rgba(139,92,246,.14),transparent 55%),#050b16;}"
     ".ld-cluster{display:grid;grid-template-columns:repeat(3,15px);gap:5px;transform:rotate(45deg);}"
@@ -182,29 +186,53 @@ def inject_theme():
 
 
 def nav_css(is_open):
-    """CSS for the icon-rail sidebar. Narrow when closed, wide (with labels) when open."""
-    width = 250 if is_open else 84
-    align = "flex-start" if is_open else "center"
+    """
+    CSS for the icon-rail sidebar.
+    Closed: every button is the same 56px square, centred in the rail (icon in the middle).
+    Open:   every button is full width and the same height, icon + name.
+    """
+    width = 260 if is_open else 92
     sb = 'section[data-testid="stSidebar"]'
-    return (
+    btn = f"{sb} .stButton>button"
+    css = (
         "<style>"
         f"{sb}{{width:{width}px !important;min-width:{width}px !important;"
         f"max-width:{width}px !important;transition:width .25s ease;}}"
         f'{sb} [data-testid="stSidebarHeader"],{sb} [data-testid="stSidebarCollapseButton"]'
         "{display:none !important;}"
-        f'{sb} [data-testid="stButton"],{sb} .stButton{{width:100% !important;margin-bottom:.15rem;}}'
-        f"{sb} .stButton>button{{width:100%;justify-content:{align};gap:12px;min-height:46px;"
-        "padding:.55rem .75rem;border-radius:14px;border:1px solid transparent;"
-        "background:transparent;color:#94a3b8;box-shadow:none;}"
-        f"{sb} .stButton>button:hover{{background:rgba(56,189,248,.12);"
+        f'{sb} [data-testid="stSidebarUserContent"]{{padding:1rem .5rem !important;}}'
+        f'{sb} [data-testid="stVerticalBlock"]{{align-items:stretch !important;gap:.4rem !important;}}'
+        # each button sits in a row that spans the rail and centres (closed) or stretches (open) it
+        f'{sb} [data-testid="stElementContainer"],{sb} .stElementContainer'
+        f"{{width:100% !important;display:flex !important;"
+        f"justify-content:{'stretch' if is_open else 'center'} !important;}}"
+        f'{sb} [data-testid="stButton"],{sb} .stButton'
+        f"{{width:{'100%' if is_open else 'auto'} !important;min-width:0 !important;"
+        "display:flex !important;justify-content:center !important;}"
+        f"{btn}{{display:flex !important;align-items:center !important;"
+        "height:56px !important;min-height:56px !important;box-sizing:border-box;"
+        "white-space:nowrap;overflow:hidden;border-radius:14px;"
+        "border:1px solid transparent;background:transparent;color:#94a3b8;box-shadow:none;"
+        "font-size:1rem;font-weight:600;}"
+        f"{btn} [data-testid='stIconMaterial'],{btn} span[data-testid='stIconMaterial']"
+        "{font-size:1.6rem !important;width:1.6rem !important;height:1.6rem !important;"
+        "flex:none !important;margin:0 !important;}"
+        f"{btn}:hover{{background:rgba(56,189,248,.12);"
         "border-color:rgba(56,189,248,.35);color:#e2e8f0;"
         "box-shadow:0 0 16px rgba(56,189,248,.18);transform:none;}"
-        f'{sb} .stButton>button[kind="primary"],'
-        f'{sb} .stButton>button[data-testid="stBaseButton-primary"]'
+        f'{btn}[kind="primary"],{btn}[data-testid="stBaseButton-primary"]'
         "{background:rgba(56,189,248,.16);border-color:rgba(56,189,248,.6);"
         "color:#38bdf8;box-shadow:0 0 18px rgba(56,189,248,.3);}"
-        "</style>"
     )
+    if is_open:
+        css += (f"{btn}{{width:100% !important;min-width:100% !important;max-width:100% !important;"
+                "justify-content:flex-start !important;gap:14px !important;padding:0 1rem !important;}")
+    else:
+        css += (f"{btn}{{width:56px !important;min-width:56px !important;max-width:56px !important;"
+                "justify-content:center !important;gap:0 !important;padding:0 !important;margin:0 auto !important;}"
+                f'{btn} [data-testid="stMarkdownContainer"]{{display:none !important;}}')
+    css += "</style>"
+    return css
 
 
 def loader_html(message="Loading"):
