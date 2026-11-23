@@ -34,7 +34,7 @@ import config  # noqa: E402
 import theme  # noqa: E402
 
 load_dotenv(ROOT / ".env")
-st.set_page_config(page_title="Pakistan Air Quality", page_icon="🌫️", layout="wide",
+st.set_page_config(page_title="Pakistan Air Quality", page_icon=":material/air:", layout="wide",
                    initial_sidebar_state="expanded")
 theme.inject_theme()
 
@@ -297,9 +297,17 @@ if current.empty:
 st.markdown(theme.nav_css(st.session_state.nav_open), unsafe_allow_html=True)
 open_ = st.session_state.nav_open
 with st.sidebar:
-    nav_button(("Close menu" if open_ else " "),
-               icon=":material/menu_open:" if open_ else ":material/menu:",
-               key="nav_toggle", on_click=toggle_nav, help="Show or hide the menu")
+    if open_:
+        # open: logo + name on the left, menu button on the right (same row, like the reference)
+        brand_col, toggle_col = st.columns([4, 1], vertical_alignment="center")
+        brand_col.markdown(theme.sidebar_brand(True), unsafe_allow_html=True)
+        with toggle_col:
+            st.button(" ", icon=":material/menu:", key="nav_toggle", on_click=toggle_nav,
+                      help="Close the menu")
+    else:
+        # closed: only the menu icon at the top, centred
+        nav_button(" ", icon=":material/menu:", key="nav_toggle", on_click=toggle_nav,
+                   help="Open the menu")
     for name, icon in zip(PAGES, ICONS):
         nav_button((name if open_ else " "), icon=f":material/{icon}:", key=f"nav_{name}",
                    on_click=go_to, args=(name,), help=name,
@@ -312,7 +320,8 @@ head_a, head_b = st.columns([3, 2])
 live_title = ("Latest stored model data. The ETL pipeline refreshes it about every 12 hours; "
               "it is not a minute-by-minute feed.")
 head_a.markdown(
-    '<div class="brand">🌫️ Pakistan Air Quality'
+    '<div class="brand"><span style="display:inline-flex;align-items:center;gap:10px">'
+    + theme.logo_svg(30) + 'Pakistan Air Quality</span>'
     '<div class="live-row">'
     f'<span class="live-pill" title="{live_title}"><i class="live-dot"></i>LIVE</span>'
     '</div></div>',
